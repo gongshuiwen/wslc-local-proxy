@@ -1,5 +1,4 @@
 param([string]$DataDirectory = (Join-Path $env:LOCALAPPDATA 'wslc-local-proxy'))
-# WSLC 3.0.3 local-proxy workaround. Keep the original managed engine running.
 . (Join-Path $PSScriptRoot 'ProxySettings.ps1')
 $global:WslcLocalProxy = [pscustomobject]@{
     Root = $PSScriptRoot
@@ -10,28 +9,19 @@ $global:WslcLocalProxy = [pscustomobject]@{
     Enabled = $true
 }
 
-function global:Invoke-WslcProxyShell {
-    param([string]$ScriptText, [string[]]$SessionArguments = @())
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ScriptText.Replace("`r`n", "`n")))
-    & $global:WslcLocalProxy.Native @SessionArguments system session run /bin/sh -c "printf %s $encoded | base64 -d | /bin/sh"
-}
-
 function global:Start-WslcProxyRelay {
     param([Parameter(Mandatory=$true)][object]$ProxySelection)
     $binary = Join-Path $global:WslcLocalProxy.Root 'wslc-local-proxy.exe'
-    $builtBinary = Join-Path $global:WslcLocalProxy.Root 'dist\wslc-local-proxy.exe'
-    if ((Test-Path -LiteralPath $builtBinary) -or (Test-Path -LiteralPath (Join-Path $global:WslcLocalProxy.Root 'go.mod'))) { $binary = $builtBinary }
+    if (Test-Path -LiteralPath (Join-Path $global:WslcLocalProxy.Root 'go.mod')) { $binary = Join-Path $global:WslcLocalProxy.Root 'dist\wslc-local-proxy.exe' }
     if (-not (Test-Path -LiteralPath $binary)) { throw 'Relay executable not found. Run Build.ps1 first.' }
     $pidPath = Join-Path $global:WslcLocalProxy.State 'relay.json'
     if (Test-Path -LiteralPath $pidPath) {
         $relayState = [IO.File]::ReadAllText($pidPath) | ConvertFrom-Json
-        if ($relayState.pid) {
-            $existing = Get-Process -Id ([int]$relayState.pid) -ErrorAction SilentlyContinue
-            if ($existing -and $existing.Path -eq $binary) {
-                if ($relayState.proxy -eq $ProxySelection.Endpoint) { return $relayState }
-                Stop-Process -Id $existing.Id -ErrorAction Stop
-                if (-not $existing.WaitForExit(5000)) { throw 'The previous relay did not exit.' }
-            }
+        $existing = Get-Process -Id ([int]$relayState.pid) -ErrorAction SilentlyContinue
+        if ($existing -and $existing.Path -eq $binary) {
+            if ($relayState.proxy -eq $ProxySelection.Endpoint) { return $relayState }
+            Stop-Process -Id $existing.Id -ErrorAction Stop
+            if (-not $existing.WaitForExit(5000)) { throw 'The previous relay did not exit.' }
         }
     }
     New-Item -ItemType Directory -Path $global:WslcLocalProxy.State -Force | Out-Null
@@ -50,40 +40,42 @@ function global:Start-WslcProxyRelay {
     throw 'Local relay startup timed out.'
 }
 
-function global:Initialize-WslcLocalProxy {
-    param([string[]]$SessionArguments = @())
-    $selection = Get-WslcProxyConfig
-    $relayState = Start-WslcProxyRelay -ProxySelection $selection
-    $bootstrap = @'
+function global:Invoke-WslcSessionRouting {
+    param([ValidateSet('enable','disable','status')][string]$Action, [int]$TlsPort, [int]$HttpPort, [string[]]$SessionArguments = @())
+    if ($Action -eq 'enable' -and ($TlsPort -lt 1 -or $HttpPort -lt 1 -or $TlsPort -gt 65535 -or $HttpPort -gt 65535)) { throw 'Invalid relay ports.' }
+    $scriptText = @'
 set -eu
 state=/run/wslc-local-proxy
 mkdir -p "$state"
 exec 9>"$state/setup.lock"
 flock -w 20 9
+cleanup() {
+  for spec in 'iptables nat' 'ip6tables filter'; do
+    set -- $spec
+    while "$1" -t "$2" -D OUTPUT -p tcp -m multiport --dports 80,443 -j WSLC_LOCAL_PROXY 2>/dev/null; do :; done
+    "$1" -t "$2" -F WSLC_LOCAL_PROXY 2>/dev/null || true
+    "$1" -t "$2" -X WSLC_LOCAL_PROXY 2>/dev/null || true
+  done
+  rm -f "$state/ready-v4"
+}
+case '__ACTION__' in
+  disable) cleanup; exit 0 ;;
+  status)
+    if [ -r "$state/ready-v4" ]; then iptables -t nat -L WSLC_LOCAL_PROXY -n -v
+    else printf '%s\n' 'Routing will be initialized before the next pull/run/create/build/push.'; fi
+    exit 0 ;;
+esac
 ports='__TLS__:__HTTP__'
 if [ -r "$state/ready-v4" ] && [ "$(cat "$state/ready-v4")" = "$ports" ] && iptables -t nat -C OUTPUT -p tcp -m multiport --dports 80,443 -j WSLC_LOCAL_PROXY 2>/dev/null; then exit 0; fi
-cleanup() {
-  for tool in iptables ip6tables; do
-    while "$tool" -t nat -D OUTPUT -p tcp -m multiport --dports 80,443 -j WSLC_LOCAL_PROXY 2>/dev/null; do :; done
-    "$tool" -t nat -F WSLC_LOCAL_PROXY 2>/dev/null || true
-    "$tool" -t nat -X WSLC_LOCAL_PROXY 2>/dev/null || true
-  done
-  while ip6tables -t filter -D OUTPUT -p tcp -m multiport --dports 80,443 -j WSLC_LOCAL_PROXY 2>/dev/null; do :; done
-  ip6tables -t filter -F WSLC_LOCAL_PROXY 2>/dev/null || true
-  ip6tables -t filter -X WSLC_LOCAL_PROXY 2>/dev/null || true
-  rm -f "$state/ready-v2" "$state/ready-v3" "$state/ready-v4"
-}
 cleanup
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 iptables -t nat -N WSLC_LOCAL_PROXY
-for network in 0.0.0.0/8 10.0.0.0/8 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4; do
-  iptables -t nat -A WSLC_LOCAL_PROXY -d "$network" -j RETURN
-done
+for network in 0.0.0.0/8 10.0.0.0/8 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4; do iptables -t nat -A WSLC_LOCAL_PROXY -d "$network" -j RETURN; done
 iptables -t nat -A WSLC_LOCAL_PROXY -p tcp --dport 443 -j REDIRECT --to-ports __TLS__
 iptables -t nat -A WSLC_LOCAL_PROXY -p tcp --dport 80 -j REDIRECT --to-ports __HTTP__
 iptables -t nat -I OUTPUT 1 -p tcp -m multiport --dports 80,443 -j WSLC_LOCAL_PROXY
-# WSLC's IPv6 loopback path cannot reach this Windows relay. Reject public
-# IPv6 HTTP(S) immediately so the engine's ordinary dual-stack dialer uses IPv4.
+# Make the engine fall back to IPv4; WSLC's IPv6 loopback forwarding failed validation.
 if [ -s /proc/net/if_inet6 ]; then
   ip6tables -t filter -N WSLC_LOCAL_PROXY
   for network in ::1/128 fc00::/7 fe80::/10 ff00::/8; do ip6tables -t filter -A WSLC_LOCAL_PROXY -d "$network" -j RETURN; done
@@ -93,35 +85,38 @@ fi
 printf '%s' "$ports" >"$state/ready-v4"
 trap - EXIT HUP INT TERM
 '@
-    $bootstrap = $bootstrap.Replace('__TLS__', [string][int]$relayState.tlsPort).Replace('__HTTP__', [string][int]$relayState.httpPort)
-    Invoke-WslcProxyShell -ScriptText $bootstrap -SessionArguments $SessionArguments
+    $scriptText = $scriptText.Replace('__ACTION__', $Action).Replace('__TLS__', [string]$TlsPort).Replace('__HTTP__', [string]$HttpPort)
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($scriptText.Replace("`r`n", "`n")))
+    & $global:WslcLocalProxy.Native @SessionArguments system session run /bin/sh -c "printf %s $encoded | base64 -d | /bin/sh"
+}
+
+function global:Initialize-WslcLocalProxy {
+    param([string[]]$SessionArguments = @())
+    $relay = Start-WslcProxyRelay -ProxySelection (Get-WslcProxyConfig)
+    Invoke-WslcSessionRouting -Action enable -TlsPort $relay.tlsPort -HttpPort $relay.httpPort -SessionArguments $SessionArguments
     if ($LASTEXITCODE -ne 0) { throw 'WSLC routing initialization failed. The requested command was not run.' }
 }
 
-function global:Invoke-WslcWithLocalProxy {
-    param([string[]]$WslcArguments)
-    if ($null -eq $WslcArguments) { $WslcArguments = @() }
-    $sessionArgs = @(); $positional = @()
-    for ($i = 0; $i -lt $WslcArguments.Count; $i++) {
-        if ($WslcArguments[$i] -eq '--session' -and $i + 1 -lt $WslcArguments.Count) {
-            $sessionArgs = @('--session', $WslcArguments[$i + 1]); $i++; continue
-        }
-        if ($WslcArguments[$i] -like '--session=*') {
-            $sessionArgs = @('--session', $WslcArguments[$i].Substring(10)); continue
-        }
-        $positional += $WslcArguments[$i]
+function global:wslc {
+    $nativeArguments = @($args)
+    $sessionArgs = @(); $offset = 0
+    while ($offset -lt $nativeArguments.Count) {
+        if ($nativeArguments[$offset] -eq '--session' -and $offset + 1 -lt $nativeArguments.Count) {
+            $sessionArgs = @('--session', $nativeArguments[$offset + 1]); $offset += 2
+        } elseif ($nativeArguments[$offset] -like '--session=*') {
+            $sessionArgs = @('--session', $nativeArguments[$offset].Substring(10)); $offset++
+        } else { break }
     }
-    $networkCommand = $positional.Count -gt 0 -and $positional[0] -in @('pull','push','build','run','create')
-    if ($positional.Count -gt 1) {
-        $networkCommand = $networkCommand -or ($positional[0] -eq 'image' -and $positional[1] -in @('pull','push','build')) -or ($positional[0] -eq 'container' -and $positional[1] -in @('run','create'))
-    }
-    if ($global:WslcLocalProxy.Enabled -and $networkCommand -and -not ($WslcArguments -contains '--help') -and -not ($WslcArguments -contains '-?')) {
-        Initialize-WslcLocalProxy -SessionArguments $sessionArgs
-    }
-    & $global:WslcLocalProxy.Native @WslcArguments
+    $command = ''; $next = ''
+    if ($offset -lt $nativeArguments.Count) { $command = $nativeArguments[$offset] }
+    if ($offset + 1 -lt $nativeArguments.Count) { $next = $nativeArguments[$offset + 1] }
+    $networkCommand = $command -in @('pull','push','build','run','create') -or ($command -eq 'image' -and $next -in @('pull','push','build')) -or ($command -eq 'container' -and $next -in @('run','create'))
+    if ($command -in @('image','container') -and $offset + 2 -lt $nativeArguments.Count) { $next = $nativeArguments[$offset + 2] }
+    if ($global:WslcLocalProxy.Enabled -and $networkCommand -and $next -notin @('--help','-?')) { Initialize-WslcLocalProxy -SessionArguments $sessionArgs }
+    & $global:WslcLocalProxy.Native @nativeArguments
     $global:LASTEXITCODE = $LASTEXITCODE
 }
-function global:wslc { Invoke-WslcWithLocalProxy -WslcArguments @($args) }
+
 function global:Get-WslcProxyConfig {
     $saved = Read-WslcProxyConfiguration -Path $global:WslcLocalProxy.ConfigPath
     $selection = Resolve-WslcProxySelection -OverrideUrl $global:WslcLocalProxy.ProxyOverride -SavedProxyUrl $saved.ProxyUrl
@@ -129,10 +124,7 @@ function global:Get-WslcProxyConfig {
 }
 function global:Set-WslcProxy {
     [CmdletBinding(DefaultParameterSetName='Manual')]
-    param(
-        [Parameter(Mandatory=$true,ParameterSetName='Manual')][string]$ProxyUrl,
-        [Parameter(Mandatory=$true,ParameterSetName='Auto')][switch]$Auto
-    )
+    param([Parameter(Mandatory=$true,ParameterSetName='Manual')][string]$ProxyUrl, [Parameter(Mandatory=$true,ParameterSetName='Auto')][switch]$Auto)
     Write-WslcProxyConfiguration -Path $global:WslcLocalProxy.ConfigPath -ProxyUrl $ProxyUrl -Auto:$Auto
     $global:WslcLocalProxy.ProxyOverride = $null
     Get-WslcProxyConfig
@@ -145,28 +137,12 @@ function global:Enable-WslcProxy {
 }
 function global:Disable-WslcProxy {
     $global:WslcLocalProxy.Enabled = $false
-    Invoke-WslcProxyShell -ScriptText @'
-for tool in iptables ip6tables; do
-  while "$tool" -t nat -D OUTPUT -p tcp -m multiport --dports 80,443 -j WSLC_LOCAL_PROXY 2>/dev/null; do :; done
-  "$tool" -t nat -F WSLC_LOCAL_PROXY 2>/dev/null || true
-  "$tool" -t nat -X WSLC_LOCAL_PROXY 2>/dev/null || true
-done
-while ip6tables -t filter -D OUTPUT -p tcp -m multiport --dports 80,443 -j WSLC_LOCAL_PROXY 2>/dev/null; do :; done
-ip6tables -t filter -F WSLC_LOCAL_PROXY 2>/dev/null || true
-ip6tables -t filter -X WSLC_LOCAL_PROXY 2>/dev/null || true
-rm -f /run/wslc-local-proxy/ready-v2 /run/wslc-local-proxy/ready-v3 /run/wslc-local-proxy/ready-v4
-'@
+    Invoke-WslcSessionRouting -Action disable
 }
 function global:Get-WslcProxyStatus {
     $selection = Get-WslcProxyConfig
     Write-Output ('Selected proxy: ' + $selection.ProxyUrl + '; source: ' + $selection.Source + '; hook enabled: ' + $global:WslcLocalProxy.Enabled)
-    Invoke-WslcProxyShell -ScriptText @'
-if [ -r /run/wslc-local-proxy/ready-v4 ]; then
-  iptables -t nat -L WSLC_LOCAL_PROXY -n -v
-else
-  printf '%s\n' 'Routing will be initialized before the next pull/run/create/build/push.'
-fi
-'@
+    Invoke-WslcSessionRouting -Action status
     $logPath = Join-Path $global:WslcLocalProxy.State 'redirect.log'
     if (Test-Path -LiteralPath $logPath) { Get-Content -LiteralPath $logPath -Tail 8 }
 }

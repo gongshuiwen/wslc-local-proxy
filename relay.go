@@ -181,11 +181,7 @@ func main() {
 			log.Fatal(e)
 		}
 		port := v4.Addr().(*net.TCPAddr).Port
-		v6, e := net.Listen("tcp", net.JoinHostPort("::1", strconv.Itoa(port)))
-		if e != nil {
-			log.Fatal(e)
-		}
-		endpoints = append(endpoints, listenerEndpoint{v4, entry.tls}, listenerEndpoint{v6, entry.tls})
+		endpoints = append(endpoints, listenerEndpoint{v4, entry.tls})
 		if entry.tls {
 			actualTLS = port
 		} else {
@@ -206,9 +202,6 @@ func main() {
 		log.Fatal(err)
 	}
 	if err = os.Rename(readyPath+".tmp", readyPath); err != nil {
-		log.Fatal(err)
-	}
-	if err = os.WriteFile(filepath.Join(*state, "redirect.pid"), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
 		log.Fatal(err)
 	}
 	log.Printf("ready pid=%d upstream=%s tls=%d http=%d", os.Getpid(), proxy, actualTLS, actualHTTP)

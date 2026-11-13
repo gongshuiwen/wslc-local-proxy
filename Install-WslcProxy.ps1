@@ -12,7 +12,7 @@ $destination = [IO.Path]::GetFullPath($InstallDirectory)
 $profileRootPath = [IO.Path]::GetFullPath($ProfileRoot)
 $binarySource = Join-Path $PSScriptRoot 'dist\wslc-local-proxy.exe'
 if (-not (Test-Path -LiteralPath $binarySource)) { throw 'Build the relay first: .\Build.ps1' }
-$files = @('profile.ps1','ProxySettings.ps1','relay.go','README.md','README.txt')
+$files = @('profile.ps1','ProxySettings.ps1','relay.go','README.md')
 foreach ($file in $files) { if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $file))) { throw ('Missing package file: ' + $file) } }
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
 $binaryTarget = Join-Path $destination 'wslc-local-proxy.exe'
@@ -34,6 +34,10 @@ foreach ($file in $files) {
     $source = Join-Path $PSScriptRoot $file; $target = Join-Path $destination $file
     if ((Test-Path -LiteralPath $target) -and (Get-FileHash -LiteralPath $source).Hash -eq (Get-FileHash -LiteralPath $target).Hash) { continue }
     Copy-Item -LiteralPath $source -Destination $target -Force
+}
+foreach ($obsolete in @('README.txt','state\redirect.pid')) {
+    $obsoletePath = Join-Path $destination $obsolete
+    if (Test-Path -LiteralPath $obsoletePath) { Remove-Item -LiteralPath $obsoletePath }
 }
 $configPath = Join-Path $destination 'config.json'
 if ($PSBoundParameters.ContainsKey('ProxyUrl')) {

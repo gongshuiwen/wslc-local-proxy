@@ -94,11 +94,11 @@ flowchart LR
     F --> G[仓库、认证服务和镜像 CDN]
 ```
 
-- Windows 辅助进程只监听 `127.0.0.1` 和 `::1`，使用动态分配的本机端口。
+- Windows 辅助进程只监听 `127.0.0.1`，使用动态分配的两个本机端口。
 - 辅助进程读取 TLS ClientHello 的 SNI 或普通 HTTP 的 Host，以确定目标域名，向选中的代理发送 CONNECT，然后转发原始字节。
 - TLS 不在辅助进程中终止，不生成替代证书。服务器证书仍由原客户端校验。
 - 会话结束后，Linux 规则自动消失；下次相关命令会重建。进程 PID、上游地址、监听端口和日志位于安装目录的 `state` 文件夹。
-- `wslc image pull`、`wslc container run` 等别名及显式 `--session` 会传递给原程序。
+- `wslc image pull`、`wslc container run` 等别名会传递给原程序。全局 `--session` 放在子命令之前；容器命令自己的 `--session`、`--help` 参数保持原样。
 
 ## 范围和限制
 
@@ -130,9 +130,10 @@ go test ./...
 go vet ./...
 .\Build.ps1
 .\tests\Test-Configuration.ps1
+.\tests\Test-Wrapper.ps1
 .\tests\Test-Installation.ps1
 ```
 
-Go 测试使用本地测试服务器，覆盖代理地址解析、HTTP 原始字节保留、TLS 数据转发以及可信/不可信证书校验。PowerShell 测试覆盖配置优先级、手动/自动切换、配置持久化、含空格路径、重复安装、代理改变后的辅助进程重启、profile 内容保留和卸载。安装测试需要本机存在 `wslc.exe`，但使用临时安装目录和临时 profile，不修改真实用户配置，也不配置真实 WSLC 会话。
+Go 测试使用本地测试服务器，覆盖代理地址解析、HTTP 原始字节保留、TLS 数据转发以及可信/不可信证书校验。PowerShell 测试覆盖配置优先级、手动/自动切换、配置持久化、命令参数转交、含空格路径、重复安装、代理改变后的辅助进程重启、profile 内容保留和卸载。包装与安装测试需要本机存在 `wslc.exe`，但使用模拟命令、临时安装目录和临时 profile，不修改真实用户配置，也不配置真实 WSLC 会话。
 
 构建结果、运行日志、本机配置和状态文件均由 `.gitignore` 排除。
