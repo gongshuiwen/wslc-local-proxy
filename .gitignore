@@ -1,0 +1,13 @@
+*.exe
+*.zip
+*.log
+*.tmp
+*.test
+sha256.txt
+config.json
+state/
+backups/
+dist/
+coverage.out
+.DS_Store
+Thumbs.db
