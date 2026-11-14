@@ -11,10 +11,17 @@ $global:WslcLocalProxy = [pscustomobject]@{
 . (Join-Path $PSScriptRoot 'RegistrySettings.ps1')
 . (Join-Path $PSScriptRoot 'RegistryMapping.ps1')
 
+function global:Invoke-WslcNative {
+    param([object[]]$Arguments)
+    $global:LASTEXITCODE = 1
+    & $global:WslcLocalProxy.Native @Arguments
+    $global:LASTEXITCODE = $LASTEXITCODE
+}
+
 function global:Invoke-WslcSessionScript {
     param([Parameter(Mandatory=$true)][string]$ScriptText, [string[]]$SessionArguments = @())
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ScriptText.Replace("`r`n", "`n")))
-    & $global:WslcLocalProxy.Native @SessionArguments system session run /bin/sh -c "printf %s $encoded | base64 -d | /bin/sh"
+    Invoke-WslcNative -Arguments (@($SessionArguments) + @('system','session','run','/bin/sh','-c',"printf %s $encoded | base64 -d | /bin/sh"))
 }
 
 function global:Start-WslcProxyRelay {
@@ -104,29 +111,34 @@ function global:Initialize-WslcLocalProxy {
     if ($LASTEXITCODE -ne 0) { throw 'WSLC routing initialization failed. The requested command was not run.' }
 }
 
-function global:wslc {
-    $nativeArguments = @($args)
+function global:Get-WslcCommandContext {
+    param([object[]]$Arguments)
     $sessionArgs = @(); $offset = 0
-    while ($offset -lt $nativeArguments.Count) {
-        if ($nativeArguments[$offset] -eq '--session' -and $offset + 1 -lt $nativeArguments.Count) {
-            $sessionArgs = @('--session', $nativeArguments[$offset + 1]); $offset += 2
-        } elseif ($nativeArguments[$offset] -like '--session=*') {
-            $sessionArgs = @('--session', $nativeArguments[$offset].Substring(10)); $offset++
+    while ($offset -lt $Arguments.Count) {
+        if ($Arguments[$offset] -eq '--session' -and $offset + 1 -lt $Arguments.Count) {
+            $sessionArgs = @('--session', $Arguments[$offset + 1]); $offset += 2
+        } elseif ($Arguments[$offset] -like '--session=*') {
+            $sessionArgs = @('--session', $Arguments[$offset].Substring(10)); $offset++
         } else { break }
     }
-    $command = ''; $next = ''
-    if ($offset -lt $nativeArguments.Count) { $command = $nativeArguments[$offset] }
-    if ($offset + 1 -lt $nativeArguments.Count) { $next = $nativeArguments[$offset + 1] }
-    $networkCommand = $command -in @('pull','push','build','run','create') -or ($command -eq 'image' -and $next -in @('pull','push','build')) -or ($command -eq 'container' -and $next -in @('run','create'))
-    if ($command -in @('image','container') -and $offset + 2 -lt $nativeArguments.Count) { $next = $nativeArguments[$offset + 2] }
-    if ($networkCommand -and $next -notin @('--help','-?')) {
-        Initialize-WslcRegistryMirrors -SessionArguments $sessionArgs
-        if ($global:WslcLocalProxy.Enabled) { Initialize-WslcLocalProxy -SessionArguments $sessionArgs }
-        Invoke-WslcRegistryMapping -Arguments ([ref]$nativeArguments) -CommandOffset $offset -SessionArguments $sessionArgs
+    $command = ''; $start = $offset + 1
+    if ($offset -lt $Arguments.Count) { $command = $Arguments[$offset] }
+    if (($command -eq 'image' -and $Arguments[$start] -in @('pull','push','build')) -or
+        ($command -eq 'container' -and $Arguments[$start] -in @('run','create'))) { $command = $Arguments[$start]; $start++ }
+    [pscustomobject]@{ Command = $command; Start = $start; SessionArguments = $sessionArgs; Network = ($command -in @('pull','push','build','run','create')); Help = ($start -lt $Arguments.Count -and $Arguments[$start] -in @('--help','-?')) }
+}
+
+function global:wslc {
+    $nativeArguments = @($args)
+    $context = Get-WslcCommandContext -Arguments $nativeArguments
+    $request = Get-WslcMappedPullRequest -Arguments $nativeArguments -Context $context
+    if ($context.Network -and -not $context.Help -and -not $request.Help) {
+        Initialize-WslcRegistryMirrors -SessionArguments $context.SessionArguments
+        if ($global:WslcLocalProxy.Enabled) { Initialize-WslcLocalProxy -SessionArguments $context.SessionArguments }
+        Invoke-WslcRegistryMapping -Arguments ([ref]$nativeArguments) -Request $request -SessionArguments $context.SessionArguments
         if ($null -eq $nativeArguments) { return }
     }
-    & $global:WslcLocalProxy.Native @nativeArguments
-    $global:LASTEXITCODE = $LASTEXITCODE
+    Invoke-WslcNative -Arguments $nativeArguments
 }
 
 function global:Get-WslcProxyConfig {

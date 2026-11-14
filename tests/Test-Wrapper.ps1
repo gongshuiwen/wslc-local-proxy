@@ -23,6 +23,10 @@ $cases = @(
     @{ Arguments=@('images'); Calls=0; Session='' },
     @{ Arguments=@('pull','--help'); Calls=0; Session='' },
     @{ Arguments=@('image','pull','--help'); Calls=0; Session='' },
+    @{ Arguments=@('pull','-q','--help'); Calls=0; Session='' },
+    @{ Arguments=@('run','--rm=false','--help'); Calls=0; Session='' },
+    @{ Arguments=@('run','--help=false','alpine:latest','echo','ok'); Calls=1; Session='' },
+    @{ Arguments=@('run','-e','--help','alpine:latest','echo','ok'); Calls=1; Session='' },
     @{ Arguments=@(); Calls=0; Session='' }
 )
 foreach ($case in $cases) {

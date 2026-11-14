@@ -1,4 +1,14 @@
 # Pure parsing/selection functions are also used by the configuration tests.
+function global:Get-WslcUriAuthority {
+    param([Uri]$Uri, [switch]$IncludePort)
+    $hostName = $Uri.DnsSafeHost.Trim([char[]]'[]').ToLowerInvariant()
+    $address = $null
+    if ([Net.IPAddress]::TryParse($hostName, [ref]$address)) { $hostName = $address.ToString().ToLowerInvariant() }
+    if ($hostName.Contains(':')) { $hostName = '[' + $hostName + ']' }
+    if ($IncludePort -or -not $Uri.IsDefaultPort) { $hostName += ':' + $Uri.Port }
+    $hostName
+}
+
 function global:ConvertTo-WslcProxyAddress {
     param([Parameter(Mandatory=$true)][string]$Value)
     $candidate = $Value.Trim()
@@ -9,11 +19,7 @@ function global:ConvertTo-WslcProxyAddress {
     if ($parsed.Scheme -ne 'http') { throw 'Only HTTP CONNECT proxies are supported. Use an http:// proxy URL, not a SOCKS or HTTPS proxy URL.' }
     if ($parsed.UserInfo -or $parsed.Query -or $parsed.Fragment -or $parsed.AbsolutePath -ne '/') { throw 'Proxy credentials, paths, queries, and fragments are not supported.' }
     if (-not $parsed.Host -or $parsed.Port -lt 1 -or $parsed.Port -gt 65535) { throw 'The proxy must have a valid host and TCP port.' }
-    $hostName = $parsed.DnsSafeHost.Trim([char[]]'[]').ToLowerInvariant()
-    $ipAddress = $null
-    if ([Net.IPAddress]::TryParse($hostName, [ref]$ipAddress)) { $hostName = $ipAddress.ToString().ToLowerInvariant() }
-    $endpoint = $hostName + ':' + [string]$parsed.Port
-    if ($hostName.Contains(':')) { $endpoint = '[' + $hostName + ']:' + [string]$parsed.Port }
+    $endpoint = Get-WslcUriAuthority -Uri $parsed -IncludePort
     [pscustomobject]@{ ProxyUrl = 'http://' + $endpoint; Endpoint = $endpoint }
 }
 
@@ -116,12 +122,7 @@ function global:ConvertTo-WslcRegistryMirrors {
             $parsed.UserInfo -or $parsed.Query -or $parsed.Fragment -or $parsed.AbsolutePath -ne '/') {
             throw 'Registry mirrors must be http(s)://host[:port] URLs without credentials, paths, queries, or fragments.'
         }
-        $normalized = $parsed.GetLeftPart([UriPartial]::Authority)
-        if ($parsed.HostNameType -eq [UriHostNameType]::IPv6) {
-            $address = [Net.IPAddress]::Parse($parsed.DnsSafeHost.Trim([char[]]'[]')).ToString()
-            $normalized = $parsed.Scheme + '://[' + $address + ']'
-            if (-not $parsed.IsDefaultPort) { $normalized += ':' + $parsed.Port }
-        }
+        $normalized = $parsed.Scheme + '://' + (Get-WslcUriAuthority -Uri $parsed)
         if ($result -notcontains $normalized) { $result += $normalized }
     }
     $result

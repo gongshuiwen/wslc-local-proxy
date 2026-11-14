@@ -21,10 +21,6 @@ if ($command -eq 'image' -and $argv[$offset + 1] -eq 'inspect') {
     else { $global:MappingCached += $last; Write-Output ('PULLED:' + $last) }
 } elseif ($command -eq 'tag') {
     $global:MappingCached += $last
-} elseif ($command -eq 'system') {
-    $filter = @($argv | Where-Object { $_ -like 'reference=*' })[0]
-    $repository = $filter.Substring(10).TrimEnd(':*')
-    Write-Output ($repository + ':one'); Write-Output ($repository + ':two')
 } elseif ($command -in @('run','container','create')) {
     $global:LASTEXITCODE = $global:MappingContainerExit
 }
@@ -38,6 +34,8 @@ function Pulls { @($global:MappingCalls | Where-Object { $_ -contains 'pull' -an
 
 Assert ((ConvertTo-WslcRegistryPrefix 'MIRROR.EXAMPLE:5000/ghcr/cache/') -ceq 'mirror.example:5000/ghcr/cache') 'prefix normalization'
 Assert ((ConvertTo-WslcRegistryPrefix '[::1]:5000/cache') -ceq '[::1]:5000/cache') 'IPv6 prefix normalization'
+Assert ((ConvertTo-WslcRegistryPrefix 'MIRROR.EXAMPLE:443/cache') -ceq 'mirror.example:443/cache') 'explicit default port remains part of an image reference'
+Assert ((ConvertTo-WslcRegistryPrefix '[::1]:443/cache') -ceq '[::1]:443/cache') 'explicit IPv6 default port remains part of an image reference'
 foreach ($invalid in @('https://mirror.example','http://mirror.example','user:pass@mirror.example','mirror.example/ns:tag','mirror.example/ns@sha256:abc','mirror.example/../cache','mirror.example/UPPER','mirror.example/a//b','mirror.example/a?x=1','mirror.example/a#fragment','mirror.example:0','mirror.example:70000','namespace-only')) {
     $value = $invalid
     Assert-Throws { ConvertTo-WslcRegistryPrefix $value } ('invalid prefix: ' + $invalid)
@@ -102,8 +100,25 @@ wslc run --rm --pull never ('ghcr.io/org/image' + $digest) echo ok | Out-Null
 Assert (($global:MappingCalls[-1] -join '|').Contains('mirror.one/ghcr/org/image' + $digest)) 'never policy can use a cached mapped digest'
 Reset-Native
 wslc pull --all-tags ghcr.io/org/image | Out-Null
-$tags = @($global:MappingCalls | Where-Object { $_[0] -eq 'tag' })
-Assert ($tags.Count -eq 2 -and $tags[0][-1] -eq 'ghcr.io/org/image:one' -and $tags[1][-1] -eq 'ghcr.io/org/image:two') 'all-tags restores every original tag'
+Assert ($global:MappingCalls.Count -eq 1 -and $global:MappingCalls[0][-1] -eq 'ghcr.io/org/image' -and $global:MappingCalls[0] -contains '--all-tags') 'all-tags stays native instead of retagging unrelated cached mirror tags'
+Reset-Native
+wslc pull -a --all-tags=false -q=false ghcr.io/org/image:tag | Out-Null
+Assert ((@(Pulls))[0][-1] -eq 'mirror.one/ghcr/org/image:tag') 'last boolean value can turn all-tags off and enable single-image mapping'
+Reset-Native
+wslc run --rm=false -ite=KEY=value -P=false --pull never --pull always ghcr.io/org/image:tag echo --help | Out-Null
+Assert (($global:MappingCalls[-1] -join '|') -eq 'run|--pull|never|--rm=false|-ite=KEY=value|-P=false|ghcr.io/org/image:tag|echo|--help') 'boolean values, combined aliases and last pull policy match native syntax'
+Reset-Native
+wslc run -itp 3001:3001 ghcr.io/org/image:tag echo ok | Out-Null
+Assert ($global:MappingCalls[-1] -contains '3001:3001' -and (@(Pulls)).Count -eq 1) 'combined flag aliases may end with a separate value option'
+Reset-Native
+wslc run -p3001:3001 ghcr.io/org/image:tag | Out-Null
+Assert ((@(Pulls)).Count -eq 0) 'invalid attached short-option values do not cause speculative pulls'
+Reset-Native
+wslc pull ghcr.io/org/requested:tag '--' ghcr.io/org/different:tag | Out-Null
+Assert ($global:MappingCalls.Count -eq 1 -and ($global:MappingCalls[0] -join '|') -eq 'pull|ghcr.io/org/requested:tag|--|ghcr.io/org/different:tag') 'extra positional arguments never replace the requested image'
+Reset-Native
+wslc run '--' ghcr.io/org/different:tag echo ok | Out-Null
+Assert ($global:MappingCalls.Count -eq 1 -and $global:MappingCalls[0][1] -eq '--') 'bare double dash retains native positional semantics'
 Reset-Native
 wslc pull quay.io/org/image:tag | Out-Null
 Assert ($global:MappingCalls.Count -eq 1 -and $global:MappingCalls[0][-1] -eq 'quay.io/org/image:tag') 'unmapped registries pass through'
@@ -111,11 +126,23 @@ wslc push ghcr.io/org/image:tag | Out-Null
 Assert ($global:MappingCalls[-1][0] -eq 'push') 'push is never remapped'
 Reset-Native
 wslc run --pull always --pull never ghcr.io/org/image:tag | Out-Null
-Assert ((@(Pulls)).Count -eq 0) 'duplicate pull-policy options are left to native validation before downloads'
+Assert ((@(Pulls)).Count -eq 0) 'last never pull policy prevents downloads'
+Reset-Native
+$realNative = $global:WslcLocalProxy.Native
+$global:WslcLocalProxy.Native = Join-Path $ScratchDirectory 'missing-native.exe'
+$global:LASTEXITCODE = 0
+Assert (-not (Test-WslcCachedImage -Image ghcr.io/org/image:tag -SessionArguments @())) 'an executable launch failure is not a cache hit'
+wslc pull ghcr.io/org/image:tag *> $null
+Assert ($LASTEXITCODE -ne 0) 'native launch failure cannot report pull success'
+$global:WslcLocalProxy.Native = $realNative
 Clear-WslcRegistryMapping -Registry ghcr.io | Out-Null
 Assert (@(Get-WslcRegistryMapping).Count -eq 1 -and (Get-WslcRegistryMapping).Registry -eq 'lscr.io') 'clear one mapping preserves others'
 Write-WslcProxyConfiguration -Path $global:WslcLocalProxy.ConfigPath -Auto
 Assert (@(Get-WslcRegistryMapping).Count -eq 1) 'proxy settings preserve mappings'
+$mappings = Read-WslcRegistryMappings
+$mappings | Add-Member -NotePropertyName 'bad/path' -NotePropertyValue @('mirror.example')
+Update-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath -Values @{ registryMappings = $mappings }
+Assert ((Get-WslcRegistryMapping -Registry lscr.io).Registry -eq 'lscr.io') 'an unrelated malformed registry key does not block a selected mapping'
 Clear-WslcRegistryMapping | Out-Null
 Reset-Native
 wslc pull ghcr.io/org/image:tag | Out-Null

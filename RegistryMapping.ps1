@@ -8,11 +8,7 @@ function global:ConvertTo-WslcRegistryPrefix {
         $parsed.AbsolutePath -ne '/' -or ($parts[0] -notmatch '[.:]' -and $parts[0] -ne 'localhost')) {
         throw 'Use a registry host[:port] or mirror host[:port]/namespace prefix, without a URL scheme or credentials.'
     }
-    $hostName = $parsed.DnsSafeHost.Trim([char[]]'[]').ToLowerInvariant()
-    $address = $null
-    if ([Net.IPAddress]::TryParse($hostName, [ref]$address)) { $hostName = $address.ToString() }
-    if ($hostName.Contains(':')) { $hostName = '[' + $hostName + ']' }
-    if (-not $parsed.IsDefaultPort) { $hostName += ':' + $parsed.Port }
+    $hostName = Get-WslcUriAuthority -Uri $parsed -IncludePort:($parts[0] -match ':\d+$')
     if ($parts.Count -eq 2) {
         if ($RegistryOnly -or $parts[1] -cnotmatch '^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*$') { throw 'Registry keys cannot contain paths; mirror namespace components must be valid lowercase image names.' }
         return $hostName + '/' + $parts[1]
@@ -20,32 +16,33 @@ function global:ConvertTo-WslcRegistryPrefix {
     $hostName
 }
 
+function global:Read-WslcRegistryMappings {
+    $mappings = (Read-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath).registryMappings
+    if ($null -eq $mappings) { return [pscustomobject]@{} }
+    if ($mappings -isnot [pscustomobject]) { throw 'registryMappings must be a JSON object of registry-to-prefix-array entries.' }
+    $mappings
+}
+
+function global:ConvertTo-WslcRegistryPrefixes {
+    param([string[]]$Prefixes)
+    $Prefixes | ForEach-Object { ConvertTo-WslcRegistryPrefix -Value $_ } | Select-Object -Unique
+}
+
 function global:Get-WslcRegistryMapping {
     param([string]$Registry)
     if ($Registry) { $Registry = ConvertTo-WslcRegistryPrefix -Value $Registry -RegistryOnly }
-    $mappings = (Read-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath).registryMappings
-    if ($null -eq $mappings) { return }
-    if ($mappings -isnot [pscustomobject]) { throw 'registryMappings must be a JSON object of registry-to-prefix-array entries.' }
-    foreach ($entry in $mappings.PSObject.Properties) {
-        $source = ConvertTo-WslcRegistryPrefix -Value $entry.Name -RegistryOnly
-        if ($Registry -and $source -ne $Registry) { continue }
-        $mirrors = @()
-        foreach ($value in $entry.Value) {
-            $prefix = ConvertTo-WslcRegistryPrefix -Value $value
-            if ($mirrors -cnotcontains $prefix) { $mirrors += $prefix }
-        }
-        [pscustomobject]@{ Registry = $source; Mirrors = $mirrors; Fallback = 'original' }
+    foreach ($entry in (Read-WslcRegistryMappings).PSObject.Properties) {
+        if ($Registry -and $entry.Name -ne $Registry) { continue }
+        [pscustomobject]@{ Registry = (ConvertTo-WslcRegistryPrefix -Value $entry.Name -RegistryOnly); Mirrors = @(ConvertTo-WslcRegistryPrefixes -Prefixes $entry.Value); Fallback = 'original' }
     }
 }
 
 function global:Set-WslcRegistryMapping {
     param([Parameter(Mandatory=$true)][string]$Registry, [Parameter(Mandatory=$true)][string[]]$Mirrors)
     $source = ConvertTo-WslcRegistryPrefix -Value $Registry -RegistryOnly
-    $normalized = @($Mirrors | ForEach-Object { ConvertTo-WslcRegistryPrefix -Value $_ } | Select-Object -Unique)
+    $normalized = @(ConvertTo-WslcRegistryPrefixes -Prefixes $Mirrors)
     if (-not $normalized.Count) { throw 'Specify at least one mirror prefix, or use Clear-WslcRegistryMapping.' }
-    $mappings = (Read-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath).registryMappings
-    if ($null -eq $mappings) { $mappings = [pscustomobject]@{} }
-    if ($mappings -isnot [pscustomobject]) { throw 'registryMappings must be a JSON object.' }
+    $mappings = Read-WslcRegistryMappings
     $mappings | Add-Member -NotePropertyName $source -NotePropertyValue $normalized -Force
     Update-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath -Values @{ registryMappings = $mappings }
     Get-WslcRegistryMapping -Registry $source
@@ -56,46 +53,55 @@ function global:Clear-WslcRegistryMapping {
     $mappings = [pscustomobject]@{}
     if ($Registry) {
         $source = ConvertTo-WslcRegistryPrefix -Value $Registry -RegistryOnly
-        $saved = (Read-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath).registryMappings
-        if ($null -ne $saved) {
-            if ($saved -isnot [pscustomobject]) { throw 'registryMappings must be a JSON object.' }
-            $mappings = $saved; $mappings.PSObject.Properties.Remove($source)
-        }
+        $mappings = Read-WslcRegistryMappings
+        $mappings.PSObject.Properties.Remove($source)
     }
     Update-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath -Values @{ registryMappings = $mappings }
     Get-WslcRegistryMapping
 }
 
 function global:Get-WslcMappedPullRequest {
-    param([string[]]$Arguments, [int]$CommandOffset)
-    $start = $CommandOffset + 1; $command = $Arguments[$CommandOffset]
-    if ($command -in @('image','container')) { $command = $Arguments[$start]; $start++ }
+    param([string[]]$Arguments, [object]$Context)
+    $start = $Context.Start; $command = $Context.Command
     if ($command -notin @('pull','run','create')) { return }
     $imageIndex = -1; $policy = 'missing'; $policyIndices = @(); $allTags = $false; $quiet = $false
-    $flags = @('--interactive','--tty','--publish-all','--rm','--no-healthcheck')
-    if ($command -eq 'run') { $flags += '--detach' }
-    $values = 'cap-add cap-drop cidfile cpus dns dns-option dns-search domainname entrypoint env env-file gpus health-cmd health-interval health-retries health-start-period health-timeout hostname ip label memory mount name network network-alias pull restart shm-size stop-signal stop-timeout tmpfs ulimit user volume workdir' -split ' '
+    $flags = @('--help','-?'); $values = @()
+    if ($command -eq 'pull') { $flags += @('--all-tags','--quiet','-a','-q') }
+    else {
+        $flags += @('--interactive','--tty','--publish-all','--rm','--no-healthcheck','-i','-t','-P')
+        if ($command -eq 'run') { $flags += @('--detach','-d') }
+        $values = @('cap-add cap-drop cidfile cpus dns dns-option dns-search domainname entrypoint env env-file gpus health-cmd health-interval health-retries health-start-period health-timeout hostname ip label memory mount name network network-alias pull restart shm-size stop-signal stop-timeout tmpfs ulimit user volume workdir' -split ' ' | ForEach-Object { '--' + $_ }) + @('-e','-h','-l','-m','-p','-u','-v','-w')
+    }
     for ($i = $start; $i -lt $Arguments.Count; $i++) {
         $token = $Arguments[$i]
-        if ($token -in @('--help','-?')) { return }
-        if ($token -eq '--') { if ($command -eq 'pull' -and $i + 2 -ne $Arguments.Count) { return }; $imageIndex = $i + 1; break }
-        if (-not $token.StartsWith('-') -or $token -eq '-') {
+        if (-not $token.StartsWith('-') -or $token -in @('-','--')) {
             if ($imageIndex -ge 0) { return }
             $imageIndex = $i
             if ($command -ne 'pull') { break }
-        } elseif ($command -eq 'pull') {
-            if ($token -cmatch '^-[aq]+$') { $allTags = $allTags -or $token.Contains('a'); $quiet = $quiet -or $token.Contains('q') }
-            elseif ($token -eq '--all-tags') { $allTags = $true }
-            elseif ($token -eq '--quiet') { $quiet = $true }
-            else { throw ('Unsupported pull option for registry mapping: ' + $token) }
-        } elseif ($token -cin $flags -or $token -cmatch '^-[itP]+$' -or ($command -eq 'run' -and $token -cmatch '^-[ditP]+$')) { continue }
-        elseif ($token -cmatch '^--([^=]+)(?:=(.*))?$') {
-            $name = $Matches[1]; $inline = $token.Contains('='); $value = $Matches[2]; $indices = @($i)
-            if ($name -cnotin $values) { throw ('Unsupported container option for registry mapping: ' + $token) }
-            if (-not $inline) { $i++; if ($i -ge $Arguments.Count) { return }; $value = $Arguments[$i]; $indices += $i }
-            if ($name -eq 'pull') { if ($policyIndices.Count) { return }; $policy = $value; $policyIndices += $indices }
-        } elseif ($token -cmatch '^-[ehlmpuvw](.*)$') { if (-not $Matches[1]) { $i++ } }
-        else { throw ('Unsupported container option for registry mapping: ' + $token) }
+            continue
+        }
+        if ($token -cmatch '^--+([^=]+)(?:=(.*))?$') { $names = @('--' + $Matches[1]) }
+        elseif ($token -cmatch '^-([^=]+)(?:=(.*))?$') { $names = @($Matches[1].ToCharArray() | ForEach-Object { '-' + $_ }) }
+        else { return }
+        $inline = $token.Contains('='); $value = $Matches[2]; $indices = @($i)
+        for ($n = 0; $n -lt $names.Count; $n++) {
+            $name = $names[$n]; $last = $n -eq $names.Count - 1
+            if ($name -cin $flags) {
+                $enabled = $true
+                if ($inline -and $last) {
+                    if ($value -cmatch '^"(.*)"$') { $value = $Matches[1] }
+                    if ($value -notin @('true','false','1','0','t','f')) { return }
+                    $enabled = $value -in @('true','1','t')
+                }
+                if ($name -in @('--help','-?') -and $enabled) { return [pscustomobject]@{ Help = $true } }
+                if ($name -in @('--all-tags','-a')) { $allTags = $enabled }
+                if ($name -in @('--quiet','-q')) { $quiet = $enabled }
+            } elseif ($name -cin $values) {
+                if (-not $last) { return }
+                if (-not $inline) { $i++; if ($i -ge $Arguments.Count) { return }; $value = $Arguments[$i]; $indices += $i }
+                if ($name -eq '--pull') { $policy = $value; $policyIndices += $indices }
+            } else { return [pscustomobject]@{ Unsupported = $token } }
+        }
     }
     if ($imageIndex -lt 0 -or $imageIndex -ge $Arguments.Count -or $policy -cnotin @('missing','always','never')) { return }
     [pscustomobject]@{ Command = $command; Start = $start; ImageIndex = $imageIndex; Image = $Arguments[$imageIndex]; Policy = $policy; PolicyIndices = $policyIndices; AllTags = $allTags; Quiet = $quiet }
@@ -105,33 +111,22 @@ function global:Test-WslcCachedImage {
     param([string]$Image, [string[]]$SessionArguments)
     # Windows PowerShell 5.1 turns redirected stderr into errors, including expected cache misses.
     $ErrorActionPreference = 'Continue'
-    & $global:WslcLocalProxy.Native @SessionArguments image inspect $Image *> $null
+    Invoke-WslcNative -Arguments (@($SessionArguments) + @('image','inspect',$Image)) *> $null
     $LASTEXITCODE -eq 0
 }
 
 function global:Invoke-WslcMappedPull {
     param([string]$Image, [string[]]$Candidates, [object]$Request, [string[]]$SessionArguments, [ref]$Resolved)
     $ErrorActionPreference = 'Continue' # Expected native failures must reach the next mirror, even with 2>&1 on PS5.1.
-    $options = @(); if ($Request.AllTags) { $options += '--all-tags' }; if ($Request.Quiet) { $options += '--quiet' }
+    $options = @(); if ($Request.Quiet) { $options += '--quiet' }
     foreach ($candidate in $Candidates) {
         if (-not $Request.Quiet) { Write-Host ('Registry pull: ' + $Image + ' -> ' + $candidate) }
-        & $global:WslcLocalProxy.Native @SessionArguments pull @options $candidate
+        Invoke-WslcNative -Arguments (@($SessionArguments) + @('pull') + $options + @($candidate))
         if ($LASTEXITCODE -ne 0) { continue }
         $Resolved.Value = $Image
         if ($candidate -cne $Image) {
             if ($Image.Contains('@')) { $Resolved.Value = $candidate }
-            else {
-                $tags = @($candidate)
-                if ($Request.AllTags) {
-                    $tags = @(& $global:WslcLocalProxy.Native @SessionArguments system session run /bin/docker image ls --filter ('reference=' + $candidate + ':*') --format '{{.Repository}}:{{.Tag}}')
-                    if ($LASTEXITCODE -ne 0) { $Resolved.Value = $null; return }
-                }
-                foreach ($tag in $tags) {
-                    $target = $Image + $tag.Substring($candidate.Length)
-                    & $global:WslcLocalProxy.Native @SessionArguments tag $tag $target
-                    if ($LASTEXITCODE -ne 0) { $Resolved.Value = $null; return }
-                }
-            }
+            else { Invoke-WslcNative -Arguments (@($SessionArguments) + @('tag',$candidate,$Image)); if ($LASTEXITCODE -ne 0) { $Resolved.Value = $null; return } }
         }
         $global:LASTEXITCODE = 0
         return
@@ -139,16 +134,19 @@ function global:Invoke-WslcMappedPull {
 }
 
 function global:Invoke-WslcRegistryMapping {
-    param([ref]$Arguments, [int]$CommandOffset, [string[]]$SessionArguments = @())
-    $mappings = (Read-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath).registryMappings
-    if ($null -eq $mappings -or -not @($mappings.PSObject.Properties).Count) { return }
-    $request = Get-WslcMappedPullRequest -Arguments $Arguments.Value -CommandOffset $CommandOffset
-    if ($null -eq $request -or $request.Image -notmatch '^([^/]+)/(.+)$') { return }
+    param([ref]$Arguments, [object]$Request, [string[]]$SessionArguments = @())
+    if ($null -eq $Request -or $Request.Help -or $Request.AllTags) { return }
+    $mappings = Read-WslcRegistryMappings
+    if (-not @($mappings.PSObject.Properties).Count) { return }
+    if ($Request.Unsupported) { throw ('Unsupported option for registry mapping: ' + $Request.Unsupported) }
+    if ($Request.Image -notmatch '^([^/]+)/(.+)$') { return }
     $source = $Matches[1]; $suffix = $Matches[2]
     if ($source -notmatch '[.:]' -and $source -ne 'localhost') { return }
-    $mapping = @(Get-WslcRegistryMapping -Registry $source)
-    if (-not $mapping.Count -or -not $mapping[0].Mirrors.Count) { return }
-    $candidates = @($mapping[0].Mirrors | ForEach-Object { $_ + '/' + $suffix })
+    $entry = $mappings.PSObject.Properties[(ConvertTo-WslcRegistryPrefix -Value $source -RegistryOnly)]
+    if ($null -eq $entry) { return }
+    $prefixes = @(ConvertTo-WslcRegistryPrefixes -Prefixes $entry.Value)
+    if (-not $prefixes.Count) { return }
+    $candidates = @($prefixes | ForEach-Object { $_ + '/' + $suffix })
     if ($candidates -cnotcontains $request.Image) { $candidates += $request.Image }
     if ($request.Command -ne 'pull' -and $request.Policy -ne 'always') {
         if (Test-WslcCachedImage -Image $request.Image -SessionArguments $SessionArguments) { return }
