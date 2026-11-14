@@ -9,6 +9,7 @@ $global:WslcLocalProxy = [pscustomobject]@{
     Enabled = $true
 }
 . (Join-Path $PSScriptRoot 'RegistrySettings.ps1')
+. (Join-Path $PSScriptRoot 'RegistryMapping.ps1')
 
 function global:Invoke-WslcSessionScript {
     param([Parameter(Mandatory=$true)][string]$ScriptText, [string[]]$SessionArguments = @())
@@ -121,6 +122,8 @@ function global:wslc {
     if ($networkCommand -and $next -notin @('--help','-?')) {
         Initialize-WslcRegistryMirrors -SessionArguments $sessionArgs
         if ($global:WslcLocalProxy.Enabled) { Initialize-WslcLocalProxy -SessionArguments $sessionArgs }
+        Invoke-WslcRegistryMapping -Arguments ([ref]$nativeArguments) -CommandOffset $offset -SessionArguments $sessionArgs
+        if ($null -eq $nativeArguments) { return }
     }
     & $global:WslcLocalProxy.Native @nativeArguments
     $global:LASTEXITCODE = $LASTEXITCODE

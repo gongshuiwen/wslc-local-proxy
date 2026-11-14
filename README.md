@@ -1,6 +1,6 @@
 # WSLC Local Proxy
 
-让 PowerShell 中的 `wslc pull` 使用本机 HTTP 代理和 Docker Hub 镜像源。默认自动检测代理，也可以显式指定；镜像源通过命令设置。
+让 PowerShell 中的 `wslc pull` 使用本机 HTTP 代理、Docker Hub 镜像源和按仓库配置的镜像源映射。默认自动检测代理，镜像源和映射通过命令设置。
 
 这是针对 **WSLC 3.0.5 / Docker 25.0.3** 实测的兼容方案，代理功能也在 3.0.3 上验证过。镜像由原来的 WSLC 引擎下载，不经过 Docker Desktop，也不需要导出、导入镜像。PowerShell 包装函数会在相关命令执行前恢复镜像源和会话内转发规则，引擎进程和事件连接保持运行。
 
@@ -101,11 +101,39 @@ Clear-WslcRegistryMirrors
 
 设置命令先校验地址并应用到引擎，成功后才保存。应用时合并 `/etc/docker/daemon.json`，保留 `features.cdi` 等其他字段，执行 `dockerd --validate`，原子替换后发送 `SIGHUP`，再查询引擎确认生效。应用失败时恢复原引擎配置；会话重建后，在下次相关命令前重新应用。不重启引擎，也不修改 Go 转发器。
 
-镜像源只影响 **Docker Hub 拉取**（如 `alpine`、`docker.io/library/alpine`），不改写镜像名称，也不影响 push；`lscr.io`、`ghcr.io` 等仓库仍使用原地址。独立 BuildKit builder 的镜像源需单独配置。地址支持根路径的 HTTP/HTTPS URL，不接受账号密码、路径、查询或片段；HTTPS 证书照常验证，不自动添加 `insecure-registries`。
+本节的引擎镜像源只影响 **Docker Hub 拉取**（如 `alpine`、`docker.io/library/alpine`）。`lscr.io`、`ghcr.io` 等仓库可使用下一节的映射功能。独立 BuildKit builder 的镜像源需单独配置。地址支持根路径的 HTTP/HTTPS URL，不接受账号密码、路径、查询或片段；HTTPS 证书照常验证，不自动添加 `insecure-registries`。
 
 镜像源与代理开关独立：`Disable-WslcProxy` 后仍会应用镜像源，`Enable-WslcProxy` 恢复代理。使用代理时，镜像源请求也遵循下述网络转发范围。
 
 参考：[Docker Hub 镜像源](https://docs.docker.com/docker-hub/image-library/mirror/)、[引擎配置热重载](https://docs.docker.com/reference/cli/dockerd/#configuration-reload-behavior)、[BuildKit 镜像源](https://docs.docker.com/build/buildkit/configure/#registry-mirror)。
+
+## 按仓库映射镜像源
+
+```powershell
+# 将占位地址替换为实际的镜像站；填写镜像引用前缀，不带 http(s)://
+Set-WslcRegistryMapping -Registry ghcr.io -Mirrors mirror.example.com/ghcr,backup.example.com/ghcr
+Set-WslcRegistryMapping -Registry lscr.io -Mirrors lscr-mirror.example.com
+Get-WslcRegistryMapping
+Get-WslcRegistryMapping -Registry ghcr.io
+
+# ghcr.io/org/image:tag -> mirror.example.com/ghcr/org/image:tag
+wslc pull ghcr.io/org/image:tag
+wslc run --rm ghcr.io/org/image:tag
+
+Clear-WslcRegistryMapping -Registry ghcr.io  # 只清除此仓库
+Clear-WslcRegistryMapping                   # 清空全部映射
+```
+
+映射保存在同一份 `config.json` 的 `registryMappings` 对象中，键为原仓库的 `host[:port]`，值为有序的镜像引用前缀数组。支持 `ghcr.io`、`lscr.io`、`quay.io`、私有仓库和目标命名空间前缀。设置后立即供后续包装命令使用，默认不预设任何公共镜像站。
+
+包装层用原生 `wslc.exe pull` 按顺序尝试镜像站，全部失败后尝试原仓库；每次只映射一层，不递归。不含显式仓库地址的镜像名继续使用 Docker Hub 的原有规则。
+
+- 覆盖 `pull`、`image pull` 及 `run/create`（包括 `container` 别名）的自动拉取。`--pull missing/always/never` 分别保留缓存、强制刷新和禁止下载的语义；镜像准备成功后容器只执行一次，应用失败不会触发回退或重跑。
+- 标签镜像拉取成功后增加原名称的本地标签，容器仍使用原标签；`pull --all-tags` 会为拉取的仓库标签恢复原名称。
+- `@sha256:...` 原样传给引擎校验。镜像以真实镜像站的 RepoDigest 存储；包装的 `run/create` 会使用对应规范引用，不伪造原仓库的 RepoDigest。直接使用 `wslc.exe image inspect` 时应查询实际镜像站的 digest 引用。
+- TLS、仓库登录和证书验证由原生引擎处理。私有镜像站需单独登录；脚本不读取或转发原仓库凭据。HTTP 私有仓库仍需原有的引擎信任设置，不自动关闭证书验证。
+- 映射仅影响此 PowerShell 包装层的拉取；push、Dockerfile 中的 `FROM`、CMD/SDK 和直接调用 `wslc.exe` 不进行映射。构建场景需配置实际使用的 BuildKit resolver。
+- 映射与代理开关独立。已有 `80/443` 代理转发范围保持不变，私有地址和自定义端口按原路由连接。
 
 ## 工作方式
 
@@ -157,11 +185,14 @@ go vet ./...
 .\tests\Test-Configuration.ps1
 .\tests\Test-Wrapper.ps1
 .\tests\Test-RegistryMirrors.ps1
+.\tests\Test-RegistryMapping.ps1
 .\tests\Test-Installation.ps1
 ```
 
-Go 测试覆盖代理地址解析、HTTP 原始字节保留、TLS 转发及证书校验。PowerShell 测试覆盖配置优先级与保留、镜像源地址校验、设置/查看/清空、引擎字段保留、会话恢复、并发编辑重试、失败不保存、命令参数转交、代理关闭时仍应用镜像源，以及安装、升级和卸载。包装、镜像源与安装测试使用模拟命令、临时安装目录和临时 profile，不修改真实用户配置或会话；需要本机存在 `wslc.exe`。
+Go 测试覆盖代理地址解析、HTTP 原始字节保留、TLS 转发及证书校验。PowerShell 测试覆盖配置保留、镜像源校验、设置/查看/清空、引擎字段保留、会话恢复、并发编辑重试，以及仓库映射的命名空间、回退、拉取策略、digest、批量标签、容器参数、退出码和 PS5.1 错误输出兼容。安装测试覆盖升级、含空格路径、代理切换、profile 保留和卸载。测试使用模拟命令、临时安装目录和临时 profile，不修改真实用户配置或会话；需要本机存在 `wslc.exe`。
 
 2026-11-14 在 WSL 3.0.5 / Docker 25.0.3 上完成实机验证：关闭 WSLC 代理后，经临时本机镜像源实际下载 `busybox:1.37.0` 的 2,211,514 字节镜像层并运行容器；热重载保持引擎 PID 不变。重建空闲会话后，包装层恢复镜像源，`run` 隐式拉取 `busybox:1.36.1` 并运行成功。还验证了不可用镜像源回退 Docker Hub、清空镜像源、LSCR 自动代理拉取，以及 Windows PowerShell 5.1 的已安装 profile 自动加载。测试镜像源已清除，安装配置保持自动代理。
+
+同日完成按仓库映射的实机验证：临时回环镜像站从 GHCR 读取公开 `stefanprodan/podinfo` 镜像，传输约 32 MB 镜像数据；验证有序回退、原标签运行、`run/create` 自动拉取、`--all-tags` 和 digest。LSCR 的 `linuxserver/webtop` 同时通过带命名空间的本机映射和直接映射到 `ghcr.io` 验证。Windows PowerShell 5.1 实测确认，错误输出重定向不妨碍镜像源回退，原仓库 digest 缓存缺失时可用已缓存的镜像站 digest 创建容器。测试服务和临时映射均已清理，默认自动代理保留。
 
 构建结果、运行日志、本机配置和状态文件均由 `.gitignore` 排除。

@@ -12,7 +12,7 @@ $destination = [IO.Path]::GetFullPath($InstallDirectory)
 $profileRootPath = [IO.Path]::GetFullPath($ProfileRoot)
 $binarySource = Join-Path $PSScriptRoot 'dist\wslc-local-proxy.exe'
 if (-not (Test-Path -LiteralPath $binarySource)) { throw 'Build the relay first: .\Build.ps1' }
-$files = @('profile.ps1','ProxySettings.ps1','RegistrySettings.ps1','README.md')
+$files = @('ProxySettings.ps1','RegistrySettings.ps1','RegistryMapping.ps1','README.md','profile.ps1')
 foreach ($file in $files) { if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $file))) { throw ('Missing package file: ' + $file) } }
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
 $binaryTarget = Join-Path $destination 'wslc-local-proxy.exe'

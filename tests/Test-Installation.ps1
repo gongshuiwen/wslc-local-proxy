@@ -11,10 +11,12 @@ if ((Get-WslcProxyConfig).ProxyUrl -ne 'http://localhost:8765') { throw 'Install
 if (Test-Path -LiteralPath (Join-Path $installation 'relay.go')) { throw 'Runtime installation contains unused Go source.' }
 [IO.File]::WriteAllText((Join-Path $installation 'relay.go'), '// obsolete runtime copy')
 Update-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath -Values @{ registryMirrors = @('https://mirror.example') }
+Set-WslcRegistryMapping -Registry ghcr.io -Mirrors mirror.example/ghcr | Out-Null
 & (Join-Path $repository 'Install-WslcProxy.ps1') -InstallDirectory $installation -ProfileRoot $documents
 if ((Get-WslcProxyConfig).ProxyUrl -ne 'http://localhost:8765') { throw 'Upgrade reset the saved override.' }
 if (Test-Path -LiteralPath (Join-Path $installation 'relay.go')) { throw 'Upgrade left unused Go source in the runtime directory.' }
 if ((Read-WslcConfiguration $global:WslcLocalProxy.ConfigPath).registryMirrors[0] -ne 'https://mirror.example' -or -not (Test-Path -LiteralPath (Join-Path $installation 'RegistrySettings.ps1'))) { throw 'Upgrade did not preserve mirror settings or install mirror support.' }
+if ((Get-WslcRegistryMapping -Registry ghcr.io).Mirrors[0] -ne 'mirror.example/ghcr' -or -not (Test-Path -LiteralPath (Join-Path $installation 'RegistryMapping.ps1'))) { throw 'Upgrade did not preserve or install per-registry mappings.' }
 foreach ($relative in @('PowerShell\profile.ps1','WindowsPowerShell\profile.ps1')) {
     $text = [IO.File]::ReadAllText((Join-Path $documents $relative))
     if ([regex]::Matches($text, '# BEGIN WSLC local proxy').Count -ne 1) { throw 'Repeated install duplicated the loader.' }
