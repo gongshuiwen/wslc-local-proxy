@@ -36,7 +36,6 @@ function global:Get-WslcWindowsProxySettings {
     [pscustomobject]@{
         Enabled = ($null -ne $settings -and $settings.ProxyEnable -eq 1)
         Server = [string]$settings.ProxyServer
-        PacUrl = [string]$settings.AutoConfigURL
     }
 }
 

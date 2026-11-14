@@ -13,8 +13,8 @@ function Assert-Throws([scriptblock]$Action, [string]$Label) {
     if (-not $failed) { throw ($Label + ': expected an error') }
     $script:configurationChecks++
 }
-$disabledWindows = [pscustomobject]@{ Enabled=$false; Server=''; PacUrl='' }
-$enabledWindows = [pscustomobject]@{ Enabled=$true; Server='http=127.0.0.1:7890;https=127.0.0.1:7891;socks=127.0.0.1:1080'; PacUrl='' }
+$disabledWindows = [pscustomobject]@{ Enabled=$false; Server='' }
+$enabledWindows = [pscustomobject]@{ Enabled=$true; Server='http=127.0.0.1:7890;https=127.0.0.1:7891;socks=127.0.0.1:1080' }
 Assert-Equal (ConvertTo-WslcProxyAddress '127.0.0.1:10808').ProxyUrl 'http://127.0.0.1:10808' 'bare address'
 Assert-Equal (ConvertTo-WslcProxyAddress 'http://LOCALHOST:7890/').Endpoint 'localhost:7890' 'normalized hostname'
 Assert-Equal (ConvertTo-WslcProxyAddress 'http://proxy.example').Endpoint 'proxy.example:80' 'default HTTP port'

@@ -72,7 +72,7 @@ function global:Initialize-WslcRegistryMirrors {
     param([string[]]$SessionArguments = @())
     $saved = Read-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath
     if ($saved.PSObject.Properties['registryMirrors']) {
-        Sync-WslcRegistryMirrors -Mirrors @(ConvertTo-WslcRegistryMirrors -Mirrors $saved.registryMirrors) -SessionArguments $SessionArguments
+        Sync-WslcRegistryMirrors -Mirrors @($saved.registryMirrors) -SessionArguments $SessionArguments
     }
 }
 
