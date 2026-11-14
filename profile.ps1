@@ -8,6 +8,13 @@ $global:WslcLocalProxy = [pscustomobject]@{
     Native = (Get-Command wslc.exe -CommandType Application -ErrorAction Stop).Source
     Enabled = $true
 }
+. (Join-Path $PSScriptRoot 'RegistrySettings.ps1')
+
+function global:Invoke-WslcSessionScript {
+    param([Parameter(Mandatory=$true)][string]$ScriptText, [string[]]$SessionArguments = @())
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ScriptText.Replace("`r`n", "`n")))
+    & $global:WslcLocalProxy.Native @SessionArguments system session run /bin/sh -c "printf %s $encoded | base64 -d | /bin/sh"
+}
 
 function global:Start-WslcProxyRelay {
     param([Parameter(Mandatory=$true)][object]$ProxySelection)
@@ -86,8 +93,7 @@ printf '%s' "$ports" >"$state/ready-v4"
 trap - EXIT HUP INT TERM
 '@
     $scriptText = $scriptText.Replace('__ACTION__', $Action).Replace('__TLS__', [string]$TlsPort).Replace('__HTTP__', [string]$HttpPort)
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($scriptText.Replace("`r`n", "`n")))
-    & $global:WslcLocalProxy.Native @SessionArguments system session run /bin/sh -c "printf %s $encoded | base64 -d | /bin/sh"
+    Invoke-WslcSessionScript -ScriptText $scriptText -SessionArguments $SessionArguments
 }
 
 function global:Initialize-WslcLocalProxy {
@@ -112,7 +118,10 @@ function global:wslc {
     if ($offset + 1 -lt $nativeArguments.Count) { $next = $nativeArguments[$offset + 1] }
     $networkCommand = $command -in @('pull','push','build','run','create') -or ($command -eq 'image' -and $next -in @('pull','push','build')) -or ($command -eq 'container' -and $next -in @('run','create'))
     if ($command -in @('image','container') -and $offset + 2 -lt $nativeArguments.Count) { $next = $nativeArguments[$offset + 2] }
-    if ($global:WslcLocalProxy.Enabled -and $networkCommand -and $next -notin @('--help','-?')) { Initialize-WslcLocalProxy -SessionArguments $sessionArgs }
+    if ($networkCommand -and $next -notin @('--help','-?')) {
+        Initialize-WslcRegistryMirrors -SessionArguments $sessionArgs
+        if ($global:WslcLocalProxy.Enabled) { Initialize-WslcLocalProxy -SessionArguments $sessionArgs }
+    }
     & $global:WslcLocalProxy.Native @nativeArguments
     $global:LASTEXITCODE = $LASTEXITCODE
 }

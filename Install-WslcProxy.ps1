@@ -12,7 +12,7 @@ $destination = [IO.Path]::GetFullPath($InstallDirectory)
 $profileRootPath = [IO.Path]::GetFullPath($ProfileRoot)
 $binarySource = Join-Path $PSScriptRoot 'dist\wslc-local-proxy.exe'
 if (-not (Test-Path -LiteralPath $binarySource)) { throw 'Build the relay first: .\Build.ps1' }
-$files = @('profile.ps1','ProxySettings.ps1','relay.go','README.md')
+$files = @('profile.ps1','ProxySettings.ps1','RegistrySettings.ps1','relay.go','README.md')
 foreach ($file in $files) { if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $file))) { throw ('Missing package file: ' + $file) } }
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
 $binaryTarget = Join-Path $destination 'wslc-local-proxy.exe'
@@ -66,4 +66,4 @@ foreach ($profilePath in $profilePaths) {
     Write-Output ('Configured profile: ' + $profilePath)
 }
 . (Join-Path $destination 'profile.ps1') -DataDirectory $destination
-Write-Output 'Installed. Proxy changes are applied before the next pull/run/create/build/push.'
+Write-Output 'Installed. Proxy and registry mirror settings are applied before the next pull/run/create/build/push.'

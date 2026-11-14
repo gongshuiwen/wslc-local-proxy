@@ -41,4 +41,18 @@ Assert-Equal (Read-WslcProxyConfiguration $configPath).ProxyUrl 'http://localhos
 Write-WslcProxyConfiguration -Path $configPath -Auto
 Assert-Equal (Read-WslcProxyConfiguration $configPath).Mode 'auto' 'switch back to automatic mode'
 Assert-Equal (Read-WslcProxyConfiguration (Join-Path $ScratchDirectory 'absent.json')).Mode 'auto' 'fresh installation defaults to auto'
+Assert-Equal ((@(ConvertTo-WslcRegistryMirrors @('HTTPS://MIRROR.EXAMPLE/','https://mirror.example','http://[::1]:5000/'))) -join '|') 'https://mirror.example|http://[::1]:5000' 'mirror normalization, order and duplicates'
+Assert-Equal (@(ConvertTo-WslcRegistryMirrors @()).Count) 0 'empty mirror list'
+foreach ($invalid in @('mirror.example','ftp://mirror.example','https://user:pass@mirror.example','https://mirror.example/path','https://mirror.example?x=1','https://mirror.example#fragment','http://mirror.example:0','http://mirror.example:70000','')) {
+    $invalidValue = $invalid
+    Assert-Throws { ConvertTo-WslcRegistryMirrors @($invalidValue) } ('reject mirror ' + $invalidValue)
+}
+Update-WslcConfiguration -Path $configPath -Values @{ registryMirrors = @('https://mirror.example'); extension = [pscustomobject]@{ keep = $true } }
+Write-WslcProxyConfiguration -Path $configPath -ProxyUrl 'localhost:8765'
+Write-WslcProxyConfiguration -Path $configPath -Auto
+Assert-Equal (Read-WslcConfiguration $configPath).registryMirrors[0] 'https://mirror.example' 'proxy changes preserve mirrors'
+Assert-Equal (Read-WslcConfiguration $configPath).extension.keep $true 'configuration changes preserve unknown fields'
+Update-WslcConfiguration -Path $configPath -Values @{ registryMirrors = @() }
+Assert-Equal (Read-WslcConfiguration $configPath).mode 'auto' 'clearing mirrors preserves automatic proxy'
+Assert-Equal (Read-WslcConfiguration $configPath).registryMirrors.Count 0 'empty mirrors remain a JSON array'
 Write-Output ('Configuration checks passed: ' + $script:configurationChecks)

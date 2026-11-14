@@ -10,6 +10,11 @@ function global:Initialize-WslcLocalProxy {
     $global:WslcTestInitCalls++
     $global:WslcTestSession = $SessionArguments -join '|'
 }
+function global:Initialize-WslcRegistryMirrors {
+    param([string[]]$SessionArguments = @())
+    $global:WslcTestMirrorCalls++
+    $global:WslcTestMirrorSession = $SessionArguments -join '|'
+}
 $cases = @(
     @{ Arguments=@('pull','alpine:latest'); Calls=1; Session='' },
     @{ Arguments=@('--session','example','image','pull','alpine:latest'); Calls=1; Session='--session|example' },
@@ -22,12 +27,15 @@ $cases = @(
 )
 foreach ($case in $cases) {
     $global:WslcTestInitCalls=0; $global:WslcTestSession=''; $global:WslcTestForwarded=@()
+    $global:WslcTestMirrorCalls=0; $global:WslcTestMirrorSession=''
     $argumentsToForward=$case.Arguments
     wslc @argumentsToForward
     if ($global:WslcTestInitCalls -ne $case.Calls -or $global:WslcTestSession -ne $case.Session) { throw ('Wrong routing dispatch: ' + ($argumentsToForward -join ' ')) }
+    if ($global:WslcTestMirrorCalls -ne $case.Calls -or $global:WslcTestMirrorSession -ne $case.Session) { throw ('Wrong mirror dispatch: ' + ($argumentsToForward -join ' ')) }
     if ((ConvertTo-Json -InputObject @($global:WslcTestForwarded) -Compress) -ne (ConvertTo-Json -InputObject @($argumentsToForward) -Compress)) { throw 'Native arguments were changed.' }
 }
-$global:WslcLocalProxy.Enabled=$false; $global:WslcTestInitCalls=0
+$global:WslcLocalProxy.Enabled=$false; $global:WslcTestInitCalls=0; $global:WslcTestMirrorCalls=0
 wslc pull alpine:latest
 if ($global:WslcTestInitCalls -ne 0) { throw 'Disabled routing was initialized.' }
-Write-Output 'Wrapper checks passed: native arguments, command help, application flags, explicit sessions, disabled mode.'
+if ($global:WslcTestMirrorCalls -ne 1) { throw 'Mirrors were disabled together with proxy routing.' }
+Write-Output 'Wrapper checks passed: native arguments, help, application flags, explicit sessions, mirrors without proxy.'

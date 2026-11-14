@@ -8,6 +8,7 @@ $destination = [IO.Path]::GetFullPath($InstallDirectory)
 $profileRootPath = [IO.Path]::GetFullPath($ProfileRoot)
 if (-not $SkipSessionCleanup -and (Test-Path -LiteralPath (Join-Path $destination 'profile.ps1'))) {
     . (Join-Path $destination 'profile.ps1') -DataDirectory $destination
+    if ((Read-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath).PSObject.Properties['registryMirrors']) { Sync-WslcRegistryMirrors -Mirrors @() }
     Disable-WslcProxy
     if ($LASTEXITCODE -ne 0) { throw 'Session cleanup failed. Remove its routing before stopping the shared relay, or use -SkipSessionCleanup only after terminating affected sessions.' }
 }

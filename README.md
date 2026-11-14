@@ -1,14 +1,14 @@
 # WSLC Local Proxy
 
-让 PowerShell 中的 `wslc pull` 通过 Windows 本机 HTTP 代理拉取镜像。代理地址可以自动检测，也可以通过参数指定。
+让 PowerShell 中的 `wslc pull` 使用本机 HTTP 代理和 Docker Hub 镜像源。默认自动检测代理，也可以显式指定；镜像源通过命令设置。
 
-这是针对 **WSLC 3.0.3** 实测的兼容方案。镜像由原来的 WSLC 引擎下载，不经过 Docker Desktop，也不需要导出、导入镜像。PowerShell 包装函数会在相关命令执行前配置会话内转发规则，原来的引擎进程和事件连接保持运行。
+这是针对 **WSLC 3.0.5 / Docker 25.0.3** 实测的兼容方案，代理功能也在 3.0.3 上验证过。镜像由原来的 WSLC 引擎下载，不经过 Docker Desktop，也不需要导出、导入镜像。PowerShell 包装函数会在相关命令执行前恢复镜像源和会话内转发规则，引擎进程和事件连接保持运行。
 
 ## 环境
 
-- Windows，已安装支持容器功能的 WSLC；目前实测版本为 3.0.3。
+- Windows，已安装支持容器功能的 WSLC；镜像源功能实测版本为 3.0.5。
 - Windows PowerShell 5.1 或 PowerShell 7。
-- 一个支持 **HTTP CONNECT** 的代理入口。
+- 使用默认自动代理时，需要一个支持 **HTTP CONNECT** 的代理入口。镜像源可在关闭代理后独立使用。
 - 从源码构建需要 Go 1.27 或更新版本；只有 Go 标准库依赖。
 
 ## 构建和安装
@@ -82,6 +82,31 @@ Enable-WslcProxy
 
 `Set-WslcProxy` 保存的改变在下一次 `pull/push/build/run/create` 时应用。切换上游地址会重启共享的辅助转发器，正在经它传输的连接会关闭；请在当前拉取完成后切换。引擎进程不需要重启。
 
+## Docker Hub 镜像源
+
+```powershell
+# 地址需替换为实际的 Docker Hub 镜像源；按顺序尝试，重复地址会去除
+Set-WslcRegistryMirrors -Mirrors https://mirror.example.com,https://backup.example.com
+
+# 查看本机保存值 Configured、当前会话生效值 Effective 和是否待同步 Pending
+Get-WslcRegistryMirrors
+
+# 清空保存值和当前会话的镜像源；保留自动代理配置
+Clear-WslcRegistryMirrors
+```
+
+三个命令都支持 `-Session <名称或ID>`，例如 `Get-WslcRegistryMirrors -Session 1`。设置保存在同一份 `config.json`，对后续相关命令使用的会话生效；`-Session` 指定本次立即查看或应用的会话。其他已运行会话在下次执行包装命令时同步。
+
+首次安装不预设镜像源，也不接管已有引擎镜像源。调用设置或清空命令后，本工具管理该列表；空数组 `[]` 表示明确禁用镜像源。修改代理模式、地址和升级安装均保留镜像源列表。
+
+设置命令先校验地址并应用到引擎，成功后才保存。应用时合并 `/etc/docker/daemon.json`，保留 `features.cdi` 等其他字段，执行 `dockerd --validate`，原子替换后发送 `SIGHUP`，再查询引擎确认生效。应用失败时恢复原引擎配置；会话重建后，在下次相关命令前重新应用。不重启引擎，也不修改 Go 转发器。
+
+镜像源只影响 **Docker Hub 拉取**（如 `alpine`、`docker.io/library/alpine`），不改写镜像名称，也不影响 push；`lscr.io`、`ghcr.io` 等仓库仍使用原地址。独立 BuildKit builder 的镜像源需单独配置。地址支持根路径的 HTTP/HTTPS URL，不接受账号密码、路径、查询或片段；HTTPS 证书照常验证，不自动添加 `insecure-registries`。
+
+镜像源与代理开关独立：`Disable-WslcProxy` 后仍会应用镜像源，`Enable-WslcProxy` 恢复代理。使用代理时，镜像源请求也遵循下述网络转发范围。
+
+参考：[Docker Hub 镜像源](https://docs.docker.com/docker-hub/image-library/mirror/)、[引擎配置热重载](https://docs.docker.com/reference/cli/dockerd/#configuration-reload-behavior)、[BuildKit 镜像源](https://docs.docker.com/build/buildkit/configure/#registry-mirror)。
+
 ## 工作方式
 
 ```mermaid
@@ -119,7 +144,7 @@ flowchart LR
 .\Uninstall-WslcProxy.ps1
 ```
 
-卸载脚本清理默认会话的规则、移除两个用户 profile 中本项目的加载段，并停止本安装的辅助进程。包文件、配置、日志和 profile 备份保留，便于检查或重新安装。其他已打开窗口中的旧函数需要通过关闭窗口清除。
+卸载脚本清空本工具管理的默认会话镜像源、清理代理规则、移除两个用户 profile 中本项目的加载段，并停止本安装的辅助进程。包文件、保存配置、日志和 profile 备份保留，便于检查或重新安装。其他已打开窗口中的旧函数需要通过关闭窗口清除。
 
 `-SkipSessionCleanup` 只用于已清理或终止相关会话的情况；否则会话可能仍保留指向已停止转发器的规则。
 
@@ -131,9 +156,12 @@ go vet ./...
 .\Build.ps1
 .\tests\Test-Configuration.ps1
 .\tests\Test-Wrapper.ps1
+.\tests\Test-RegistryMirrors.ps1
 .\tests\Test-Installation.ps1
 ```
 
-Go 测试使用本地测试服务器，覆盖代理地址解析、HTTP 原始字节保留、TLS 数据转发以及可信/不可信证书校验。PowerShell 测试覆盖配置优先级、手动/自动切换、配置持久化、命令参数转交、含空格路径、重复安装、代理改变后的辅助进程重启、profile 内容保留和卸载。包装与安装测试需要本机存在 `wslc.exe`，但使用模拟命令、临时安装目录和临时 profile，不修改真实用户配置，也不配置真实 WSLC 会话。
+Go 测试覆盖代理地址解析、HTTP 原始字节保留、TLS 转发及证书校验。PowerShell 测试覆盖配置优先级与保留、镜像源地址校验、设置/查看/清空、引擎字段保留、会话恢复、并发编辑重试、失败不保存、命令参数转交、代理关闭时仍应用镜像源，以及安装、升级和卸载。包装、镜像源与安装测试使用模拟命令、临时安装目录和临时 profile，不修改真实用户配置或会话；需要本机存在 `wslc.exe`。
+
+2026-11-14 在 WSL 3.0.5 / Docker 25.0.3 上完成实机验证：关闭 WSLC 代理后，经临时本机镜像源实际下载 `busybox:1.37.0` 的 2,211,514 字节镜像层并运行容器；热重载保持引擎 PID 不变。重建空闲会话后，包装层恢复镜像源，`run` 隐式拉取 `busybox:1.36.1` 并运行成功。还验证了不可用镜像源回退 Docker Hub、清空镜像源、LSCR 自动代理拉取，以及 Windows PowerShell 5.1 的已安装 profile 自动加载。测试镜像源已清除，安装配置保持自动代理。
 
 构建结果、运行日志、本机配置和状态文件均由 `.gitignore` 排除。

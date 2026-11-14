@@ -67,10 +67,31 @@ function global:Resolve-WslcProxySelection {
     [pscustomobject]@{ ProxyUrl = $selection.ProxyUrl; Endpoint = $selection.Endpoint; Source = $source }
 }
 
+function global:Read-WslcConfiguration {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return [pscustomobject]@{ mode = 'auto'; proxyUrl = $null } }
+    $config = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
+    if ($config -isnot [pscustomobject]) { throw 'Configuration must be a JSON object.' }
+    $config
+}
+
+function global:Update-WslcConfiguration {
+    param([Parameter(Mandatory=$true)][string]$Path, [Parameter(Mandatory=$true)][hashtable]$Values)
+    $config = Read-WslcConfiguration -Path $Path
+    foreach ($key in $Values.Keys) { $config | Add-Member -NotePropertyName $key -NotePropertyValue $Values[$key] -Force }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    $temporary = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+        [IO.File]::WriteAllText($temporary, ($config | ConvertTo-Json -Depth 32), (New-Object Text.UTF8Encoding($true)))
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary }
+    }
+}
+
 function global:Read-WslcProxyConfiguration {
     param([Parameter(Mandatory=$true)][string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) { return [pscustomobject]@{ Mode = 'auto'; ProxyUrl = $null } }
-    $config = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
+    $config = Read-WslcConfiguration -Path $Path
     if ($config.mode -notin @('auto','manual')) { throw 'Invalid proxy configuration mode; expected auto or manual.' }
     if ($config.mode -eq 'manual') {
         $address = ConvertTo-WslcProxyAddress -Value ([string]$config.proxyUrl)
@@ -81,11 +102,28 @@ function global:Read-WslcProxyConfiguration {
 
 function global:Write-WslcProxyConfiguration {
     param([Parameter(Mandatory=$true)][string]$Path, [string]$ProxyUrl, [switch]$Auto)
-    $config = [ordered]@{ mode = 'auto'; proxyUrl = $null }
+    $config = @{ mode = 'auto'; proxyUrl = $null }
     if (-not $Auto) { $config.mode = 'manual'; $config.proxyUrl = (ConvertTo-WslcProxyAddress -Value $ProxyUrl).ProxyUrl }
-    $parent = Split-Path -Parent $Path
-    New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    $encoding = New-Object Text.UTF8Encoding($true)
-    [IO.File]::WriteAllText($Path + '.tmp', ($config | ConvertTo-Json), $encoding)
-    Move-Item -LiteralPath ($Path + '.tmp') -Destination $Path -Force
+    Update-WslcConfiguration -Path $Path -Values $config
+}
+
+function global:ConvertTo-WslcRegistryMirrors {
+    param([AllowEmptyCollection()][string[]]$Mirrors = @())
+    $result = @()
+    foreach ($mirror in $Mirrors) {
+        $parsed = $null
+        if (-not $mirror -or -not [Uri]::TryCreate($mirror.Trim(), [UriKind]::Absolute, [ref]$parsed) -or
+            $parsed.Scheme -notin @('http','https') -or -not $parsed.Host -or $parsed.Port -lt 1 -or
+            $parsed.UserInfo -or $parsed.Query -or $parsed.Fragment -or $parsed.AbsolutePath -ne '/') {
+            throw 'Registry mirrors must be http(s)://host[:port] URLs without credentials, paths, queries, or fragments.'
+        }
+        $normalized = $parsed.GetLeftPart([UriPartial]::Authority)
+        if ($parsed.HostNameType -eq [UriHostNameType]::IPv6) {
+            $address = [Net.IPAddress]::Parse($parsed.DnsSafeHost.Trim([char[]]'[]')).ToString()
+            $normalized = $parsed.Scheme + '://[' + $address + ']'
+            if (-not $parsed.IsDefaultPort) { $normalized += ':' + $parsed.Port }
+        }
+        if ($result -notcontains $normalized) { $result += $normalized }
+    }
+    $result
 }
