@@ -5,6 +5,7 @@
 *.test
 sha256.txt
 config.json
+config.json.lock
 state/
 backups/
 dist/

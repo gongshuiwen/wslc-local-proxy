@@ -134,7 +134,8 @@ Clear-WslcRegistryMapping                   # 清空全部映射
 - TLS、仓库登录和证书验证由原生引擎处理。私有镜像站需单独登录；脚本不读取或转发原仓库凭据。HTTP 私有仓库仍需原有的引擎信任设置，不自动关闭证书验证。
 - 映射仅影响此 PowerShell 包装层的拉取；push、Dockerfile 中的 `FROM`、CMD/SDK 和直接调用 `wslc.exe` 不进行映射。构建场景需配置实际使用的 BuildKit resolver。
 - 映射与代理开关独立。已有 `80/443` 代理转发范围保持不变，私有地址和自定义端口按原路由连接。
-- 配置命令应串行执行；配置文件使用临时文件替换，但尚未锁定跨进程的读取、修改和保存事务，并发设置可能覆盖对方的改动。
+- 配置读写共用 `config.json.lock` 的跨进程独占句柄，读取、修改和保存处于同一事务中。不同配置项和不同仓库映射可以并发修改，同一项按提交顺序生效；清空全部映射仍表示全量清空。默认最多等待锁 10 秒，超时明确报错并保留原配置。
+- 锁由操作系统持有的文件句柄决定，进程退出后自动释放；磁盘上保留空锁文件是正常现象，无需删除。升级后请重开或重新加载所有 PowerShell 窗口；旧脚本和直接编辑 JSON 不参与此锁。
 - 参数解析与 WSLC 3.0.5 保持一致，支持布尔参数（如 `--rm=false`）、组合短参数（如 `-itp 3001:3001`）和重复选项取最后值。原生 WSLC 将单独的 `--` 当作位置参数；PowerShell 中要传递该字面值需写作 `'--'`。
 
 ## 工作方式
@@ -185,6 +186,7 @@ go test ./...
 go vet ./...
 .\Build.ps1
 .\tests\Test-Configuration.ps1
+.\tests\Test-ConfigurationConcurrency.ps1
 .\tests\Test-Wrapper.ps1
 .\tests\Test-RegistryMirrors.ps1
 .\tests\Test-RegistryMapping.ps1
@@ -193,8 +195,12 @@ go vet ./...
 
 Go 测试覆盖代理地址解析、HTTP 原始字节保留、TLS 转发及证书校验。PowerShell 测试覆盖配置保留、镜像源校验、设置/查看/清空、引擎字段保留、会话恢复、并发编辑重试，以及仓库映射的命名空间、回退、拉取策略、digest、批量标签、容器参数、退出码和 PS5.1 错误输出兼容。安装测试覆盖升级、含空格路径、代理切换、profile 保留和卸载。测试使用模拟命令、临时安装目录和临时 profile，不修改真实用户配置或会话；需要本机存在 `wslc.exe`。
 
+并发测试使用 6 个混合 Windows PowerShell 5.1 / PowerShell 7 写进程和一个持续读进程，验证 72 次累加、72 个映射新增/删除、代理和镜像源更新均不丢失，以及锁超时不写入、编辑失败不提交、强制终止持锁进程后可继续读写。锁使用 Windows 文件共享语义，无额外依赖；读取也进入同一锁，避免 Windows 文件替换期间短暂不可见。实现参考 [FileShare](https://learn.microsoft.com/en-us/dotnet/api/system.io.fileshare) 和 [File.Replace](https://learn.microsoft.com/en-us/dotnet/api/system.io.file.replace)。
+
 2026-11-14 在 WSL 3.0.5 / Docker 25.0.3 上完成实机验证：关闭 WSLC 代理后，经临时本机镜像源实际下载 `busybox:1.37.0` 的 2,211,514 字节镜像层并运行容器；热重载保持引擎 PID 不变。重建空闲会话后，包装层恢复镜像源，`run` 隐式拉取 `busybox:1.36.1` 并运行成功。还验证了不可用镜像源回退 Docker Hub、清空镜像源、LSCR 自动代理拉取，以及 Windows PowerShell 5.1 的已安装 profile 自动加载。测试镜像源已清除，安装配置保持自动代理。
 
 同日完成按仓库映射的实机验证：临时回环镜像站从 GHCR 读取公开 `stefanprodan/podinfo` 镜像，传输约 32 MB 镜像数据；验证有序回退、原标签运行、`run/create` 自动拉取和 digest。LSCR 的 `linuxserver/webtop` 同时通过带命名空间的本机映射和直接映射到 `ghcr.io` 验证。Windows PowerShell 5.1 实测确认，错误输出重定向不妨碍镜像源回退，原仓库 digest 缓存缺失时可用已缓存的镜像站 digest 创建容器。测试服务和临时映射均已清理，默认自动代理保留。
+
+2026-11-15 在源码和已安装版本上完成跨进程配置锁验证：6 个混合版本写进程与持续读进程通过 169 项检查，覆盖并发增删、字段保留、锁超时、持锁进程被终止、失败编辑和管道读取后的再次更新。PowerShell 5.1、7 的既有配置、映射、包装和安装回归测试通过，用户原有自动代理与镜像源配置保留。
 
 构建结果、运行日志、本机配置和状态文件均由 `.gitignore` 排除。

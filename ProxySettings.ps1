@@ -74,23 +74,48 @@ function global:Resolve-WslcProxySelection {
 
 function global:Read-WslcConfiguration {
     param([Parameter(Mandatory=$true)][string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) { return [pscustomobject]@{ mode = 'auto'; proxyUrl = $null } }
-    $config = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
-    if ($config -isnot [pscustomobject]) { throw 'Configuration must be a JSON object.' }
-    $config
+    $configuration = Update-WslcConfiguration -Path $Path -ReadOnly
+    $configuration
 }
 
 function global:Update-WslcConfiguration {
-    param([Parameter(Mandatory=$true)][string]$Path, [Parameter(Mandatory=$true)][hashtable]$Values)
-    $config = Read-WslcConfiguration -Path $Path
-    foreach ($key in $Values.Keys) { $config | Add-Member -NotePropertyName $key -NotePropertyValue $Values[$key] -Force }
+    [CmdletBinding(DefaultParameterSetName='Values')]
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true,ParameterSetName='Values')][hashtable]$Values,
+        [Parameter(Mandatory=$true,ParameterSetName='Edit')][scriptblock]$Edit,
+        [Parameter(Mandatory=$true,ParameterSetName='Read')][switch]$ReadOnly,
+        [ValidateRange(1,60000)][int]$LockTimeoutMilliseconds = 10000
+    )
+    $ErrorActionPreference = 'Stop'
+    $Path = [IO.Path]::GetFullPath($Path)
     New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
-    $temporary = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+    $lock = $null
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $temporary = $null
     try {
+        while ($null -eq $lock) {
+            try { $lock = [IO.File]::Open($Path + '.lock', [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+            catch [IO.IOException] {
+                if (($_.Exception.HResult -band 65535) -notin @(32,33)) { throw }
+                if ($timer.ElapsedMilliseconds -ge $LockTimeoutMilliseconds) { throw [TimeoutException]::new('Timed out waiting for configuration lock: ' + $Path + '.lock') }
+                Start-Sleep -Milliseconds 50
+            }
+        }
+        $config = [pscustomobject]@{ mode = 'auto'; proxyUrl = $null }
+        if ([IO.File]::Exists($Path)) { $config = [IO.File]::ReadAllText($Path) | ConvertFrom-Json }
+        if ($config -isnot [pscustomobject]) { throw 'Configuration must be a JSON object.' }
+        if ($PSCmdlet.ParameterSetName -eq 'Read') { return $config }
+        if ($null -ne $Edit) { & $Edit $config | Out-Null }
+        else { foreach ($key in $Values.Keys) { $config | Add-Member -NotePropertyName $key -NotePropertyValue $Values[$key] -Force } }
+        $temporary = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
         [IO.File]::WriteAllText($temporary, ($config | ConvertTo-Json -Depth 32), (New-Object Text.UTF8Encoding($true)))
-        Move-Item -LiteralPath $temporary -Destination $Path -Force
+        if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary, $Path, [NullString]::Value) }
+        else { [IO.File]::Move($temporary, $Path) }
     } finally {
-        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary }
+        # The open handle is the lock. Keep the sidecar so waiters always open the same file.
+        if ($null -ne $lock) { $lock.Dispose() }
+        if ($temporary -and (Test-Path -LiteralPath $temporary)) { Remove-Item -LiteralPath $temporary }
     }
 }
 

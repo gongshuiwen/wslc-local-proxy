@@ -17,7 +17,8 @@ function global:ConvertTo-WslcRegistryPrefix {
 }
 
 function global:Read-WslcRegistryMappings {
-    $mappings = (Read-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath).registryMappings
+    param([object]$Configuration = (Read-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath))
+    $mappings = $Configuration.registryMappings
     if ($null -eq $mappings) { return [pscustomobject]@{} }
     if ($mappings -isnot [pscustomobject]) { throw 'registryMappings must be a JSON object of registry-to-prefix-array entries.' }
     $mappings
@@ -42,21 +43,27 @@ function global:Set-WslcRegistryMapping {
     $source = ConvertTo-WslcRegistryPrefix -Value $Registry -RegistryOnly
     $normalized = @(ConvertTo-WslcRegistryPrefixes -Prefixes $Mirrors)
     if (-not $normalized.Count) { throw 'Specify at least one mirror prefix, or use Clear-WslcRegistryMapping.' }
-    $mappings = Read-WslcRegistryMappings
-    $mappings | Add-Member -NotePropertyName $source -NotePropertyValue $normalized -Force
-    Update-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath -Values @{ registryMappings = $mappings }
+    Update-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath -Edit {
+        param($configuration)
+        $mappings = Read-WslcRegistryMappings -Configuration $configuration
+        $mappings | Add-Member -NotePropertyName $source -NotePropertyValue $normalized -Force
+        $configuration | Add-Member -NotePropertyName registryMappings -NotePropertyValue $mappings -Force
+    }
     Get-WslcRegistryMapping -Registry $source
 }
 
 function global:Clear-WslcRegistryMapping {
     param([ValidateNotNullOrEmpty()][string]$Registry)
-    $mappings = [pscustomobject]@{}
-    if ($Registry) {
-        $source = ConvertTo-WslcRegistryPrefix -Value $Registry -RegistryOnly
-        $mappings = Read-WslcRegistryMappings
-        $mappings.PSObject.Properties.Remove($source)
+    if ($Registry) { $source = ConvertTo-WslcRegistryPrefix -Value $Registry -RegistryOnly }
+    Update-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath -Edit {
+        param($configuration)
+        $mappings = [pscustomobject]@{}
+        if ($Registry) {
+            $mappings = Read-WslcRegistryMappings -Configuration $configuration
+            $mappings.PSObject.Properties.Remove($source)
+        }
+        $configuration | Add-Member -NotePropertyName registryMappings -NotePropertyValue $mappings -Force
     }
-    Update-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath -Values @{ registryMappings = $mappings }
     Get-WslcRegistryMapping
 }
 
