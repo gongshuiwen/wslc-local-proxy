@@ -74,8 +74,17 @@ function global:Resolve-WslcProxySelection {
 
 function global:Read-WslcConfiguration {
     param([Parameter(Mandatory=$true)][string]$Path)
-    $configuration = Update-WslcConfiguration -Path $Path -ReadOnly
-    $configuration
+    Update-WslcConfiguration -Path $Path -ReadOnly
+}
+
+function global:Assert-WslcConfigurationDepth {
+    param([object]$Value, [int]$Depth = 0)
+    if ($Value -isnot [pscustomobject] -and $Value -isnot [Collections.IDictionary] -and $Value -isnot [Array]) { return }
+    if ($Depth -gt 100) { throw 'Configuration nesting exceeds 100 levels; no changes were saved.' }
+    if ($Value -is [Collections.IDictionary]) { $children = $Value.Values }
+    elseif ($Value -is [Array]) { $children = $Value }
+    else { $children = @($Value.PSObject.Properties | ForEach-Object { ,$_.Value }) }
+    foreach ($child in $children) { Assert-WslcConfigurationDepth -Value $child -Depth ($Depth + 1) }
 }
 
 function global:Update-WslcConfiguration {
@@ -89,11 +98,16 @@ function global:Update-WslcConfiguration {
     )
     $ErrorActionPreference = 'Stop'
     $Path = [IO.Path]::GetFullPath($Path)
-    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    if (Get-Variable -Name WslcConfigurationActive -Scope Script -ValueOnly -ErrorAction SilentlyContinue) {
+        throw [InvalidOperationException]::new('Nested configuration transactions are not supported; edit the supplied configuration snapshot instead.')
+    }
     $lock = $null
     $timer = [Diagnostics.Stopwatch]::StartNew()
     $temporary = $null
+    $backup = $Path + '.bak'
+    $script:WslcConfigurationActive = $true
     try {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
         while ($null -eq $lock) {
             try { $lock = [IO.File]::Open($Path + '.lock', [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
             catch [IO.IOException] {
@@ -102,21 +116,33 @@ function global:Update-WslcConfiguration {
                 Start-Sleep -Milliseconds 50
             }
         }
+        if (-not [IO.File]::Exists($Path) -and [IO.File]::Exists($backup)) { [IO.File]::Move($backup, $Path) }
         $config = [pscustomobject]@{ mode = 'auto'; proxyUrl = $null }
-        if ([IO.File]::Exists($Path)) { $config = [IO.File]::ReadAllText($Path) | ConvertFrom-Json }
+        if ([IO.File]::Exists($Path)) {
+            $json = [IO.File]::ReadAllText($Path)
+            if (-not $json.TrimStart().StartsWith('{')) { throw 'Configuration must be a JSON object.' }
+            $config = $json | ConvertFrom-Json
+        }
         if ($config -isnot [pscustomobject]) { throw 'Configuration must be a JSON object.' }
-        if ($PSCmdlet.ParameterSetName -eq 'Read') { return $config }
-        if ($null -ne $Edit) { & $Edit $config | Out-Null }
-        else { foreach ($key in $Values.Keys) { $config | Add-Member -NotePropertyName $key -NotePropertyValue $Values[$key] -Force } }
-        $temporary = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
-        [IO.File]::WriteAllText($temporary, ($config | ConvertTo-Json -Depth 32), (New-Object Text.UTF8Encoding($true)))
-        if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary, $Path, [NullString]::Value) }
-        else { [IO.File]::Move($temporary, $Path) }
+        if ($PSCmdlet.ParameterSetName -ne 'Read') {
+            if ($null -ne $Edit) { & $Edit $config | Out-Null }
+            else { foreach ($key in $Values.Keys) { $config | Add-Member -NotePropertyName $key -NotePropertyValue $Values[$key] -Force } }
+            Assert-WslcConfigurationDepth -Value $config
+            $temporary = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+            [IO.File]::WriteAllText($temporary, ($config | ConvertTo-Json -Depth 100 -WarningAction Stop), (New-Object Text.UTF8Encoding($true)))
+            # Keep the old file: ReplaceFile can fail after moving the destination aside.
+            if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary, $Path, $backup) }
+            else { [IO.File]::Move($temporary, $Path) }
+        }
+    } catch {
+        if ($temporary -and -not [IO.File]::Exists($Path) -and [IO.File]::Exists($backup)) { [IO.File]::Move($backup, $Path) }
+        throw
     } finally {
         # The open handle is the lock. Keep the sidecar so waiters always open the same file.
-        if ($null -ne $lock) { $lock.Dispose() }
-        if ($temporary -and (Test-Path -LiteralPath $temporary)) { Remove-Item -LiteralPath $temporary }
+        try { if ($null -ne $lock) { $lock.Dispose() } } finally { $script:WslcConfigurationActive = $false }
+        if ($temporary -and [IO.File]::Exists($Path)) { Remove-Item -LiteralPath $temporary -ErrorAction SilentlyContinue }
     }
+    if ($PSCmdlet.ParameterSetName -eq 'Read') { $config }
 }
 
 function global:Read-WslcProxyConfiguration {

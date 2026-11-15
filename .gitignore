@@ -6,6 +6,7 @@
 sha256.txt
 config.json
 config.json.lock
+config.json.bak
 state/
 backups/
 dist/

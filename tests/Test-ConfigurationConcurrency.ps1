@@ -15,9 +15,12 @@ $gate = Join-Path $ScratchDirectory 'start'
 $stop = Join-Path $ScratchDirectory 'stop'
 
 if ($Mode -eq 'Hold') {
-    $held = [IO.File]::Open($configPath + '.lock', [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-    try { [IO.File]::WriteAllText((Join-Path $ScratchDirectory 'held'), 'ready'); while ($true) { Start-Sleep -Milliseconds 100 } }
-    finally { $held.Dispose() }
+    Update-WslcConfiguration -Path $configPath -Edit {
+        param($config)
+        $config.marker = 'never commit this interrupted edit'
+        [IO.File]::WriteAllText((Join-Path $ScratchDirectory 'held'), 'ready')
+        while ($true) { Start-Sleep -Milliseconds 100 }
+    }
     return
 }
 if ($Mode -in @('Write','Read')) {
@@ -98,6 +101,7 @@ try {
     Assert $readTimedOut 'Readers must use the same lock as writers'
     Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -eq [Convert]::ToBase64String($before)) 'Lock timeout must leave file bytes unchanged'
     $holder.Kill(); Assert ($holder.WaitForExit(5000)) 'Lock holder did not stop'
+    Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -eq [Convert]::ToBase64String($before)) 'Killing an actual edit must preserve the original file'
     Update-WslcConfiguration -Path $configPath -Values @{ recovered=$true }
     Assert (Read-WslcConfiguration $configPath).recovered 'Terminating the holder must release the OS lock'
     $failed = $false
@@ -106,6 +110,21 @@ try {
     Assert ($failed -and (Read-WslcConfiguration $configPath).marker -eq 'preserve') 'A failing edit must not commit'
     Read-WslcConfiguration $configPath | ForEach-Object { Update-WslcConfiguration -Path $configPath -Values @{ pipelineRead=$true } -LockTimeoutMilliseconds 150 }
     Assert (Read-WslcConfiguration $configPath).pipelineRead 'Readers must release the lock before passing a snapshot downstream'
+    Update-WslcConfiguration -Path $configPath -ReadOnly | ForEach-Object { Update-WslcConfiguration -Path $configPath -Values @{ directPipelineRead=$true } -LockTimeoutMilliseconds 150 }
+    Assert (Read-WslcConfiguration $configPath).directPipelineRead 'The common read transaction must also release the lock before pipeline output'
+    $nested = $false
+    try { Update-WslcConfiguration -Path $configPath -Edit { param($config); Read-WslcConfiguration $configPath | Out-Null } }
+    catch [InvalidOperationException] { $nested = $true }
+    Assert $nested 'A nested transaction must fail immediately instead of waiting for its own lock'
+    Update-WslcConfiguration -Path $configPath -Values @{ afterNested=$true }
+    Assert (Read-WslcConfiguration $configPath).afterNested 'A rejected nested transaction must not poison future transactions'
+    $before = [IO.File]::ReadAllBytes($configPath)
+    $blocked = [IO.File]::Open($configPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $failed = $false
+    try { Update-WslcConfiguration -Path $configPath -Values @{ blockedReplacement=$true } }
+    catch [IO.IOException] { $failed = $true }
+    finally { $blocked.Dispose() }
+    Assert ($failed -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -eq [Convert]::ToBase64String($before)) 'A blocked file replacement must preserve the original file'
 
     $reader = Start-Child $ps7 Read 0
     $writers = @()
@@ -133,6 +152,26 @@ try {
     Assert ($final.mode -eq 'auto' -and $null -eq $final.proxyUrl -and $final.marker -eq 'preserve' -and $final.registryMirrors[0] -eq ('https://hub-' + ($Iterations - 1) + '.example')) 'Proxy, mirror or unrelated settings were overwritten'
     Assert ([int][IO.File]::ReadAllText((Join-Path $ScratchDirectory 'reads')) -gt 0) 'The concurrent reader did not run'
     Assert (@(Get-ChildItem -LiteralPath $ScratchDirectory -Filter '*.tmp').Count -eq 0) 'Temporary files were not cleaned up'
+    $deep = [pscustomobject]@{ sentinel='preserve nested data' }
+    for ($level = 0; $level -lt 99; $level++) { $deep = [pscustomobject]@{ child=$deep } }
+    Update-WslcConfiguration -Path $configPath -Values @{ extension=$deep }
+    Assert ([IO.File]::ReadAllText($configPath).Contains('preserve nested data')) 'Nested fields must not be silently truncated'
+    $before = [IO.File]::ReadAllBytes($configPath)
+    for ($level = 0; $level -lt 70; $level++) { $deep = [pscustomobject]@{ child=$deep } }
+    $failed = $false
+    try { Update-WslcConfiguration -Path $configPath -Values @{ extension=$deep } } catch { $failed=$true }
+    Assert ($failed -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -eq [Convert]::ToBase64String($before)) 'Excessive JSON depth must fail before committing'
+    [IO.File]::WriteAllText($configPath, '[{"mode":"auto","proxyUrl":null}]')
+    $invalid = [IO.File]::ReadAllBytes($configPath); $failed = $false
+    try { Update-WslcConfiguration -Path $configPath -Values @{ unexpected=$true } } catch { $failed=$true }
+    Assert ($failed -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -eq [Convert]::ToBase64String($invalid)) 'An array root must be rejected without rewriting it'
+    [IO.File]::WriteAllBytes($configPath, $before)
+    [IO.File]::Copy($configPath, $configPath + '.bak', $true)
+    [IO.File]::Delete($configPath)
+    $recovered = Read-WslcConfiguration $configPath
+    Assert ($recovered.marker -eq 'preserve' -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -eq [Convert]::ToBase64String($before)) 'A missing primary file must recover the backup under the lock'
+    Assert (-not [IO.File]::Exists($configPath + '.bak')) 'Recovery must rename the backup atomically instead of copying into a visible partial file'
+    Assert ($null -eq $recovered.unexpected) 'Invalid-root edits must never be committed'
     Write-Output ('Cross-process configuration checks passed: ' + $script:checks + '; 6 mixed PS5.1/PS7 writers, ' + (6 * $Iterations) + ' increments, mappings and removals; continuous reader; timeout, killed holder and failed edit recovery.')
 } finally {
     foreach ($child in $script:children) { if (-not $child.HasExited) { $child.Kill(); $child.WaitForExit(5000) | Out-Null }; $child.Dispose() }
