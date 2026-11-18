@@ -15,7 +15,12 @@ if (Test-Path -LiteralPath (Join-Path $installation 'relay.go')) { throw 'Runtim
 [IO.File]::WriteAllText((Join-Path $installation 'relay.go'), '// obsolete runtime copy')
 Update-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath -Values @{ registryMirrors = @('https://mirror.example') }
 Set-WslcRegistryMapping -Registry ghcr.io -Mirrors mirror.example/ghcr | Out-Null
-& (Join-Path $repository 'Install-WslcProxy.ps1') -InstallDirectory $installation -ProfileRoot $documents
+foreach ($file in @('ProxySettings.ps1','wslc-local-proxy.exe')) { Set-Content -LiteralPath (Join-Path $installation $file) -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3" -Encoding ASCII }
+'' | & (Join-Path $repository 'Install.cmd') -InstallDirectory $installation -ProfileRoot $documents
+if ($LASTEXITCODE -ne 0) { throw 'Installation launcher failed during upgrade.' }
+foreach ($file in @('ProxySettings.ps1','wslc-local-proxy.exe')) {
+    if (Get-Item -LiteralPath (Join-Path $installation $file) -Stream Zone.Identifier -ErrorAction SilentlyContinue) { throw ('Upgrade left a downloaded file blocked: ' + $file) }
+}
 if ((Get-WslcProxyConfig).ProxyUrl -ne 'http://localhost:8765') { throw 'Upgrade reset the saved override.' }
 if (Test-Path -LiteralPath (Join-Path $installation 'relay.go')) { throw 'Upgrade left unused Go source in the runtime directory.' }
 if ((Read-WslcConfiguration $global:WslcLocalProxy.ConfigPath).registryMirrors[0] -ne 'https://mirror.example' -or -not (Test-Path -LiteralPath (Join-Path $installation 'RegistrySettings.ps1'))) { throw 'Upgrade did not preserve mirror settings or install mirror support.' }
