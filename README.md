@@ -11,7 +11,30 @@
 - 使用默认自动代理时，需要一个支持 **HTTP CONNECT** 的代理入口。镜像源可在关闭代理后独立使用。
 - 从源码构建需要 Go 1.27 或更新版本；只有 Go 标准库依赖。
 
-## 构建和安装
+## 下载和安装
+
+从 [最新 Release](https://github.com/gongshuiwen/wslc-local-proxy/releases/latest) 下载适合系统架构的安装包：
+
+- 普通 Intel / AMD 64 位 Windows：`wslc-local-proxy-<版本>-windows-amd64.zip`。
+- ARM64 Windows：`wslc-local-proxy-<版本>-windows-arm64.zip`。
+
+先安装支持容器功能的 WSLC，确保 PowerShell 中能找到 `wslc.exe`。将 ZIP **完整解压**到任意目录，双击 `Install.cmd` 即可安装到当前用户，无需管理员权限或 Go。首次安装默认自动检测本机代理，升级保留已保存的配置。安装后重开 PowerShell，再执行：
+
+```powershell
+Get-WslcProxyConfig
+wslc pull lscr.io/linuxserver/webtop:latest
+```
+
+也可以在解压目录中通过命令行安装，参数与源码安装相同：
+
+```powershell
+.\Install.cmd
+.\Install.cmd -ProxyUrl http://127.0.0.1:10808
+```
+
+Release 同时提供 `SHA256SUMS.txt`；可用 `Get-FileHash .\下载的安装包.zip -Algorithm SHA256` 核对。GitHub 自动生成的 `Source code` 压缩包不含编译好的程序；需要直接安装时请选择上述 Windows ZIP 附件。
+
+## 从源码构建和安装
 
 ```powershell
 .\Build.ps1

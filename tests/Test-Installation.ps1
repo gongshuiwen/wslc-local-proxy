@@ -1,6 +1,9 @@
-param([string]$ScratchDirectory = (Join-Path ([IO.Path]::GetTempPath()) ('wslc-install-tests-' + [guid]::NewGuid().ToString('N'))))
+param(
+    [string]$ScratchDirectory = (Join-Path ([IO.Path]::GetTempPath()) ('wslc-install-tests-' + [guid]::NewGuid().ToString('N'))),
+    [string]$PackageDirectory = (Split-Path -Parent $PSScriptRoot)
+)
 $ErrorActionPreference = 'Stop'
-$repository = Split-Path -Parent $PSScriptRoot
+$repository = [IO.Path]::GetFullPath($PackageDirectory)
 $installation = Join-Path $ScratchDirectory 'installation with spaces'
 $documents = Join-Path $ScratchDirectory 'documents with spaces'
 $existingProfile = Join-Path $documents 'PowerShell\profile.ps1'
