@@ -7,21 +7,24 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'InstallSupport.ps1')
+if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) { Invoke-WslcNativeSetup $PSCommandPath $PSBoundParameters; return }
 $null = Get-Command wslc.exe -CommandType Application -ErrorAction Stop
 $manual = $PSBoundParameters.ContainsKey('ProxyUrl')
 if ($manual) { $ProxyUrl = (ConvertTo-WslcProxyAddress $ProxyUrl).ProxyUrl }
-$destination = [IO.Path]::GetFullPath($InstallDirectory)
+$destination = Resolve-WslcInstallPath $InstallDirectory
 $binarySource = Join-Path $PSScriptRoot 'dist\wslc-local-proxy.exe'
-$files = @('ProxySettings.ps1','RegistrySettings.ps1','RegistryMapping.ps1','InstallSupport.ps1','Uninstall-WslcProxy.ps1','Uninstall.cmd','README.md','profile.ps1')
+$files = @(Get-WslcInstallFiles)
 foreach ($file in @($binarySource) + @($files | ForEach-Object { Join-Path $PSScriptRoot $_ })) { if (-not [IO.File]::Exists($file)) { throw ('Missing package file: ' + $file) } }
-Assert-WslcInstallBinary $binarySource
+$binaryBytes=Read-WslcInstallBinary $binarySource
 $lock = Lock-WslcInstallation
 $processes = @()
 try {
     $profileRootPath = Get-WslcInstallProfileRoot $destination $ProfileRoot
+    $previousRoot=$profileRootPath
+    if ([IO.File]::Exists((Join-Path $destination 'install.json'))) { $previousRoot=Get-WslcInstallProfileRoot $destination }
     $changes = [Collections.ArrayList]::new()
     $binaryTarget = Join-Path $destination 'wslc-local-proxy.exe'
-    Add-WslcFileChange $changes $binaryTarget ([IO.File]::ReadAllBytes($binarySource))
+    Add-WslcFileChange $changes $binaryTarget $binaryBytes
     $restartRelay = $changes.Count -gt 0
     $statePath = Join-Path $destination 'state\relay.json'
     if ([IO.File]::Exists($statePath)) {
@@ -36,8 +39,12 @@ try {
     $metadata = [Text.UTF8Encoding]::new($false).GetBytes((@{ profileRoot=$profileRootPath } | ConvertTo-Json -Compress))
     Add-WslcFileChange $changes (Join-Path $destination 'install.json') $metadata
     foreach ($relative in @('PowerShell\profile.ps1','WindowsPowerShell\profile.ps1')) {
+        if ($previousRoot -ne $profileRootPath) {
+            $old=Get-WslcProfileUpdate (Join-Path $previousRoot $relative) $destination -Remove
+            if ($old.Changed) { Add-WslcFileChange $changes $old.Path $old.Bytes -Profile -Original $old.Original }
+        }
         $update = Get-WslcProfileUpdate (Join-Path $profileRootPath $relative) $destination
-        if ($update.Changed) { Add-WslcFileChange $changes $update.Path $update.Bytes -Profile }
+        if ($update.Changed) { Add-WslcFileChange $changes $update.Path $update.Bytes -Profile -Original $update.Original }
     }
     $configPath = Join-Path $destination 'config.json'
     if ([IO.File]::Exists($configPath)) { Read-WslcProxyConfiguration $configPath | Out-Null }

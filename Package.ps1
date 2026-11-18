@@ -4,10 +4,11 @@ param(
     [string]$OutputDirectory = (Join-Path $PSScriptRoot 'dist\releases')
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'InstallSupport.ps1')
 Add-Type -AssemblyName System.IO.Compression
-$OutputDirectory=[IO.Path]::GetFullPath($OutputDirectory)
+$OutputDirectory=Resolve-WslcInstallPath $OutputDirectory
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
-$files=@('Install.cmd','Install-WslcProxy.ps1','Uninstall.cmd','Uninstall-WslcProxy.ps1','InstallSupport.ps1','ProxySettings.ps1','RegistrySettings.ps1','RegistryMapping.ps1','profile.ps1','README.md')
+$files=@(Get-WslcInstallFiles) + @('Install.cmd','Install-WslcProxy.ps1')
 $hashes=@()
 foreach ($arch in $Architecture) {
     $build=Join-Path $OutputDirectory ('windows-'+$arch)

@@ -5,7 +5,8 @@
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'InstallSupport.ps1')
-$destination = [IO.Path]::GetFullPath($InstallDirectory)
+if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) { Invoke-WslcNativeSetup $PSCommandPath $PSBoundParameters; return }
+$destination = Resolve-WslcInstallPath $InstallDirectory
 $lock = Lock-WslcInstallation
 $processes = @()
 try {
@@ -14,7 +15,7 @@ try {
     Add-WslcFileChange $changes (Join-Path $destination 'state\relay.json') $null
     foreach ($relative in @('PowerShell\profile.ps1','WindowsPowerShell\profile.ps1')) {
         $update = Get-WslcProfileUpdate (Join-Path $profileRootPath $relative) $destination -Remove
-        if ($update.Changed) { Add-WslcFileChange $changes $update.Path $update.Bytes -Profile }
+        if ($update.Changed) { Add-WslcFileChange $changes $update.Path $update.Bytes -Profile -Original $update.Original }
         $foreign = $foreign -or $update.Foreign
     }
     $processes = @(Get-WslcInstallRelay $destination)
