@@ -30,10 +30,13 @@ if ($copyBinary) {
     }
     Copy-Item -LiteralPath $binarySource -Destination $binaryTarget -Force
 }
+Unblock-File -LiteralPath $binaryTarget
 foreach ($file in $files) {
     $source = Join-Path $PSScriptRoot $file; $target = Join-Path $destination $file
-    if ((Test-Path -LiteralPath $target) -and (Get-FileHash -LiteralPath $source).Hash -eq (Get-FileHash -LiteralPath $target).Hash) { continue }
-    Copy-Item -LiteralPath $source -Destination $target -Force
+    if (-not (Test-Path -LiteralPath $target) -or (Get-FileHash -LiteralPath $source).Hash -ne (Get-FileHash -LiteralPath $target).Hash) {
+        Copy-Item -LiteralPath $source -Destination $target -Force
+    }
+    Unblock-File -LiteralPath $target
 }
 foreach ($obsolete in @('README.txt','state\redirect.pid','relay.go')) {
     $obsoletePath = Join-Path $destination $obsolete
