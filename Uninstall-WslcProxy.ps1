@@ -1,38 +1,35 @@
-param(
-    [string]$InstallDirectory = (Join-Path $env:LOCALAPPDATA 'wslc-local-proxy'),
-    [string]$ProfileRoot = ([Environment]::GetFolderPath('MyDocuments')),
+﻿param(
+    [string]$InstallDirectory = $(if ([IO.File]::Exists((Join-Path $PSScriptRoot 'install.json')) -or [IO.File]::Exists((Join-Path $PSScriptRoot 'wslc-local-proxy.exe'))) { $PSScriptRoot } else { Join-Path $env:LOCALAPPDATA 'wslc-local-proxy' }),
+    [string]$ProfileRoot,
     [switch]$SkipSessionCleanup
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'InstallSupport.ps1')
 $destination = [IO.Path]::GetFullPath($InstallDirectory)
-$profileRootPath = [IO.Path]::GetFullPath($ProfileRoot)
-if (-not $SkipSessionCleanup -and (Test-Path -LiteralPath (Join-Path $destination 'profile.ps1'))) {
-    . (Join-Path $destination 'profile.ps1') -DataDirectory $destination
-    if ((Read-WslcConfiguration -Path $global:WslcLocalProxy.ConfigPath).PSObject.Properties['registryMirrors']) { Sync-WslcRegistryMirrors -Mirrors @() }
-    Disable-WslcProxy
-    if ($LASTEXITCODE -ne 0) { throw 'Session cleanup failed. Remove its routing before stopping the shared relay, or use -SkipSessionCleanup only after terminating affected sessions.' }
-}
-$pattern = '(?ms)^# BEGIN WSLC local proxy\r?\n.*?^# END WSLC local proxy\r?\n?'
-$encoding = New-Object Text.UTF8Encoding($true)
-foreach ($relative in @('PowerShell\profile.ps1','WindowsPowerShell\profile.ps1')) {
-    $path = Join-Path $profileRootPath $relative
-    if (Test-Path -LiteralPath $path) {
-        $contents = [IO.File]::ReadAllText($path)
-        $updated = [regex]::Replace($contents, $pattern, '')
-        if ($updated -ne $contents) {
-            $backupDirectory = Join-Path $destination 'backups'
-            New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
-            $backupName = (Split-Path (Split-Path $path) -Leaf) + '-uninstall-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.ps1'
-            Copy-Item -LiteralPath $path -Destination (Join-Path $backupDirectory $backupName)
-            [IO.File]::WriteAllText($path, $updated, $encoding)
-        }
+$lock = Lock-WslcInstallation
+$processes = @()
+try {
+    $profileRootPath = Get-WslcInstallProfileRoot $destination $ProfileRoot
+    $changes = [Collections.ArrayList]::new(); $foreign = $false
+    Add-WslcFileChange $changes (Join-Path $destination 'state\relay.json') $null
+    foreach ($relative in @('PowerShell\profile.ps1','WindowsPowerShell\profile.ps1')) {
+        $update = Get-WslcProfileUpdate (Join-Path $profileRootPath $relative) $destination -Remove
+        if ($update.Changed) { Add-WslcFileChange $changes $update.Path $update.Bytes -Profile }
+        $foreign = $foreign -or $update.Foreign
     }
+    $processes = @(Get-WslcInstallRelay $destination)
+    Invoke-WslcInstallChanges -Changes @($changes) -Destination $destination -Commit {
+        if (-not $SkipSessionCleanup -and -not $foreign -and [IO.File]::Exists((Join-Path $destination 'profile.ps1'))) {
+            . (Join-Path $destination 'profile.ps1') -DataDirectory $destination
+            if ((Read-WslcConfiguration (Join-Path $destination 'config.json')).PSObject.Properties['registryMirrors']) { Sync-WslcRegistryMirrors -Mirrors @() }
+            Disable-WslcProxy
+            if ($LASTEXITCODE -ne 0) { throw 'Session cleanup failed. Close affected WSLC sessions before using -SkipSessionCleanup.' }
+        }
+        Stop-WslcInstallRelay $processes
+    }
+    if ($global:WslcLocalProxy -and $global:WslcLocalProxy.Root -eq $destination) { Remove-Item -LiteralPath 'Function:\wslc' -ErrorAction SilentlyContinue }
+} finally {
+    foreach ($process in $processes) { $process.Dispose() }
+    $lock.Dispose()
 }
-$metadataPath = Join-Path $destination 'state\relay.json'
-if (Test-Path -LiteralPath $metadataPath) {
-    $metadata = [IO.File]::ReadAllText($metadataPath) | ConvertFrom-Json
-    $relay = Get-Process -Id ([int]$metadata.pid) -ErrorAction SilentlyContinue
-    if ($relay -and $relay.Path -eq (Join-Path $destination 'wslc-local-proxy.exe')) { Stop-Process -Id $relay.Id -ErrorAction Stop }
-}
-if ($global:WslcLocalProxy -and $global:WslcLocalProxy.Root -eq $destination) { Remove-Item -LiteralPath 'Function:\wslc' -ErrorAction SilentlyContinue }
-Write-Output 'Autoload removed. Close old PowerShell windows. Package files, configuration, logs, and profile backups are retained.'
+Write-Output 'Autoload removed. Close old PowerShell windows. Files, configuration and profile backups are retained.'

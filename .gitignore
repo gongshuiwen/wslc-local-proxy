@@ -7,6 +7,9 @@ sha256.txt
 config.json
 config.json.lock
 config.json.bak
+install.json
+.install.lock
+*.rollback*
 state/
 backups/
 dist/

@@ -1,72 +1,55 @@
-[CmdletBinding(DefaultParameterSetName='Auto')]
+﻿[CmdletBinding(DefaultParameterSetName='Auto')]
 param(
     [Parameter(Mandatory=$true,ParameterSetName='Manual')][string]$ProxyUrl,
     [Parameter(ParameterSetName='Auto')][switch]$Auto,
     [string]$InstallDirectory = (Join-Path $env:LOCALAPPDATA 'wslc-local-proxy'),
-    [string]$ProfileRoot = ([Environment]::GetFolderPath('MyDocuments'))
+    [string]$ProfileRoot
 )
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'ProxySettings.ps1')
-if ($PSBoundParameters.ContainsKey('ProxyUrl')) { $ProxyUrl = (ConvertTo-WslcProxyAddress -Value $ProxyUrl).ProxyUrl }
+. (Join-Path $PSScriptRoot 'InstallSupport.ps1')
+$null = Get-Command wslc.exe -CommandType Application -ErrorAction Stop
+$manual = $PSBoundParameters.ContainsKey('ProxyUrl')
+if ($manual) { $ProxyUrl = (ConvertTo-WslcProxyAddress $ProxyUrl).ProxyUrl }
 $destination = [IO.Path]::GetFullPath($InstallDirectory)
-$profileRootPath = [IO.Path]::GetFullPath($ProfileRoot)
 $binarySource = Join-Path $PSScriptRoot 'dist\wslc-local-proxy.exe'
-if (-not (Test-Path -LiteralPath $binarySource)) { throw 'Build the relay first: .\Build.ps1' }
-$files = @('ProxySettings.ps1','RegistrySettings.ps1','RegistryMapping.ps1','README.md','profile.ps1')
-foreach ($file in $files) { if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $file))) { throw ('Missing package file: ' + $file) } }
-New-Item -ItemType Directory -Path $destination -Force | Out-Null
-$binaryTarget = Join-Path $destination 'wslc-local-proxy.exe'
-$copyBinary = -not (Test-Path -LiteralPath $binaryTarget)
-if (-not $copyBinary) { $copyBinary = (Get-FileHash -LiteralPath $binarySource).Hash -ne (Get-FileHash -LiteralPath $binaryTarget).Hash }
-if ($copyBinary) {
-    $metadataPath = Join-Path $destination 'state\relay.json'
-    if (Test-Path -LiteralPath $metadataPath) {
-        $metadata = [IO.File]::ReadAllText($metadataPath) | ConvertFrom-Json
-        $runningRelay = Get-Process -Id ([int]$metadata.pid) -ErrorAction SilentlyContinue
-        if ($runningRelay -and $runningRelay.Path -eq $binaryTarget) {
-            Stop-Process -Id $runningRelay.Id -ErrorAction Stop
-            if (-not $runningRelay.WaitForExit(5000)) { throw 'The old relay did not exit.' }
-        }
+$files = @('ProxySettings.ps1','RegistrySettings.ps1','RegistryMapping.ps1','InstallSupport.ps1','Uninstall-WslcProxy.ps1','Uninstall.cmd','README.md','profile.ps1')
+foreach ($file in @($binarySource) + @($files | ForEach-Object { Join-Path $PSScriptRoot $_ })) { if (-not [IO.File]::Exists($file)) { throw ('Missing package file: ' + $file) } }
+Assert-WslcInstallBinary $binarySource
+$lock = Lock-WslcInstallation
+$processes = @()
+try {
+    $profileRootPath = Get-WslcInstallProfileRoot $destination $ProfileRoot
+    $changes = [Collections.ArrayList]::new()
+    $binaryTarget = Join-Path $destination 'wslc-local-proxy.exe'
+    Add-WslcFileChange $changes $binaryTarget ([IO.File]::ReadAllBytes($binarySource))
+    $restartRelay = $changes.Count -gt 0
+    $statePath = Join-Path $destination 'state\relay.json'
+    if ([IO.File]::Exists($statePath)) {
+        try {
+            $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+            if ($state -isnot [pscustomobject] -or [long]$state.pid -lt 1 -or [int]$state.tlsPort -lt 1 -or [int]$state.tlsPort -gt 65535 -or [int]$state.httpPort -lt 1 -or [int]$state.httpPort -gt 65535) { $restartRelay = $true }
+        } catch { $restartRelay = $true }
     }
-    Copy-Item -LiteralPath $binarySource -Destination $binaryTarget -Force
-}
-Unblock-File -LiteralPath $binaryTarget
-foreach ($file in $files) {
-    $source = Join-Path $PSScriptRoot $file; $target = Join-Path $destination $file
-    if (-not (Test-Path -LiteralPath $target) -or (Get-FileHash -LiteralPath $source).Hash -ne (Get-FileHash -LiteralPath $target).Hash) {
-        Copy-Item -LiteralPath $source -Destination $target -Force
+    if ($restartRelay) { $processes = @(Get-WslcInstallRelay $destination); Add-WslcFileChange $changes $statePath $null }
+    foreach ($file in $files) { Add-WslcFileChange $changes (Join-Path $destination $file) ([IO.File]::ReadAllBytes((Join-Path $PSScriptRoot $file))) }
+    foreach ($file in @('README.txt','state\redirect.pid','relay.go')) { Add-WslcFileChange $changes (Join-Path $destination $file) $null }
+    $metadata = [Text.UTF8Encoding]::new($false).GetBytes((@{ profileRoot=$profileRootPath } | ConvertTo-Json -Compress))
+    Add-WslcFileChange $changes (Join-Path $destination 'install.json') $metadata
+    foreach ($relative in @('PowerShell\profile.ps1','WindowsPowerShell\profile.ps1')) {
+        $update = Get-WslcProfileUpdate (Join-Path $profileRootPath $relative) $destination
+        if ($update.Changed) { Add-WslcFileChange $changes $update.Path $update.Bytes -Profile }
     }
-    Unblock-File -LiteralPath $target
-}
-foreach ($obsolete in @('README.txt','state\redirect.pid','relay.go')) {
-    $obsoletePath = Join-Path $destination $obsolete
-    if (Test-Path -LiteralPath $obsoletePath) { Remove-Item -LiteralPath $obsoletePath }
-}
-$configPath = Join-Path $destination 'config.json'
-if ($PSBoundParameters.ContainsKey('ProxyUrl')) {
-    Write-WslcProxyConfiguration -Path $configPath -ProxyUrl $ProxyUrl
-} elseif ($Auto -or -not (Test-Path -LiteralPath $configPath)) {
-    Write-WslcProxyConfiguration -Path $configPath -Auto
-}
-$profilePaths = @((Join-Path $profileRootPath 'PowerShell\profile.ps1'), (Join-Path $profileRootPath 'WindowsPowerShell\profile.ps1'))
-$loader = ". '" + (Join-Path $destination 'profile.ps1').Replace("'", "''") + "' -DataDirectory '" + $destination.Replace("'", "''") + "'"
-$block = '# BEGIN WSLC local proxy' + "`r`n" + $loader + "`r`n" + '# END WSLC local proxy'
-$encoding = New-Object Text.UTF8Encoding($true)
-foreach ($profilePath in $profilePaths) {
-    $contents = ''
-    if (Test-Path -LiteralPath $profilePath) {
-        $contents = [IO.File]::ReadAllText($profilePath)
-        $backupDirectory = Join-Path $destination 'backups'
-        New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
-        $backupName = (Split-Path (Split-Path $profilePath) -Leaf) + '-profile-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.ps1'
-        Copy-Item -LiteralPath $profilePath -Destination (Join-Path $backupDirectory $backupName)
+    $configPath = Join-Path $destination 'config.json'
+    if ([IO.File]::Exists($configPath)) { Read-WslcProxyConfiguration $configPath | Out-Null }
+    Invoke-WslcInstallChanges -Changes @($changes) -Destination $destination -Commit {
+        foreach ($file in @('wslc-local-proxy.exe') + $files) { Unblock-File -LiteralPath (Join-Path $destination $file) }
+        . (Join-Path $destination 'profile.ps1') -DataDirectory $destination
+        if ($manual) { Write-WslcProxyConfiguration $configPath -ProxyUrl $ProxyUrl }
+        elseif ($Auto -or -not [IO.File]::Exists($configPath)) { Write-WslcProxyConfiguration $configPath -Auto }
+        if ($restartRelay) { Stop-WslcInstallRelay $processes -Warn }
     }
-    $pattern = '(?ms)^# BEGIN WSLC local proxy\r?\n.*?^# END WSLC local proxy\r?\n?'
-    $contents = [regex]::Replace($contents, $pattern, '')
-    $contents = $contents.TrimEnd() + "`r`n`r`n" + $block + "`r`n"
-    New-Item -ItemType Directory -Path (Split-Path $profilePath) -Force | Out-Null
-    [IO.File]::WriteAllText($profilePath, $contents, $encoding)
-    Write-Output ('Configured profile: ' + $profilePath)
+} finally {
+    foreach ($process in $processes) { $process.Dispose() }
+    $lock.Dispose()
 }
-. (Join-Path $destination 'profile.ps1') -DataDirectory $destination
-Write-Output 'Installed. Proxy and registry mirror settings are applied before the next pull/run/create/build/push.'
+Write-Output 'Installed. Open a new PowerShell window. Existing proxy and mirror settings are preserved unless explicitly changed.'

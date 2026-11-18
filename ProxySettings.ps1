@@ -87,6 +87,20 @@ function global:Assert-WslcConfigurationDepth {
     foreach ($child in $children) { Assert-WslcConfigurationDepth -Value $child -Depth ($Depth + 1) }
 }
 
+function global:Open-WslcFileLock {
+    param([string]$Path, [ValidateRange(1,60000)][int]$TimeoutMilliseconds = 10000)
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force -ErrorAction Stop | Out-Null
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        try { return [IO.File]::Open($Path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+        catch [IO.IOException] {
+            if (($_.Exception.HResult -band 65535) -notin @(32,33)) { throw }
+            if ($timer.ElapsedMilliseconds -ge $TimeoutMilliseconds) { throw [TimeoutException]::new('Timed out waiting for lock: ' + $Path) }
+            Start-Sleep -Milliseconds 50
+        }
+    }
+}
+
 function global:Update-WslcConfiguration {
     [CmdletBinding(DefaultParameterSetName='Values')]
     param(
@@ -102,20 +116,11 @@ function global:Update-WslcConfiguration {
         throw [InvalidOperationException]::new('Nested configuration transactions are not supported; edit the supplied configuration snapshot instead.')
     }
     $lock = $null
-    $timer = [Diagnostics.Stopwatch]::StartNew()
     $temporary = $null
     $backup = $Path + '.bak'
     $script:WslcConfigurationActive = $true
     try {
-        New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
-        while ($null -eq $lock) {
-            try { $lock = [IO.File]::Open($Path + '.lock', [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
-            catch [IO.IOException] {
-                if (($_.Exception.HResult -band 65535) -notin @(32,33)) { throw }
-                if ($timer.ElapsedMilliseconds -ge $LockTimeoutMilliseconds) { throw [TimeoutException]::new('Timed out waiting for configuration lock: ' + $Path + '.lock') }
-                Start-Sleep -Milliseconds 50
-            }
-        }
+        $lock = Open-WslcFileLock -Path ($Path + '.lock') -TimeoutMilliseconds $LockTimeoutMilliseconds
         if (-not [IO.File]::Exists($Path) -and [IO.File]::Exists($backup)) { [IO.File]::Move($backup, $Path) }
         $config = [pscustomobject]@{ mode = 'auto'; proxyUrl = $null }
         if ([IO.File]::Exists($Path)) {

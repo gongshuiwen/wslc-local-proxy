@@ -34,6 +34,12 @@ wslc pull lscr.io/linuxserver/webtop:latest
 
 Release 同时提供 `SHA256SUMS.txt`；可用 `Get-FileHash .\下载的安装包.zip -Algorithm SHA256` 核对。GitHub 自动生成的 `Source code` 压缩包不含编译好的程序；需要直接安装时请选择上述 Windows ZIP 附件。
 
+安装前检查 WSLC、程序架构和程序校验值。安装与卸载共用当前用户的跨进程锁；不变的文件和 profile 不重写、不增加备份。ANSI、UTF-8 和带 BOM 的 Unicode profile 会保留原有文本，修改后的 profile 使用兼容 PowerShell 5.1 的 UTF-8 BOM 编码，原始字节另存到 `backups`。
+
+文件更新先暂存，再逐个原子替换；短暂共享冲突最多重试约 1 秒，已产生恢复备份的部分替换不重试。捕获到失败时恢复已修改的文件，旧转发器继续运行。成功升级程序后才停止旧转发器，下次相关 WSLC 命令会重新启动它；升级前应结束正在进行的镜像传输。若恢复也被文件占用等原因阻止，会报错并保留 `.rollback` 文件供恢复。强制结束安装进程或断电不属于完整安装回滚的保证范围。
+
+自定义的 `-ProfileRoot` 会记入安装目录的 `install.json`，后续升级和卸载可自动读取。从 v0.1.0 的自定义 profile 路径升级时，首次仍需传入原来的 `-ProfileRoot` 参数。
+
 ## 从源码构建和安装
 
 ```powershell
@@ -194,13 +200,13 @@ flowchart LR
 
 ## 卸载
 
-关闭其他正在使用此方案的 PowerShell 窗口；对于额外的 WSLC 会话，先清理其规则或终止已空闲的会话。然后执行：
+关闭其他正在使用此方案的 PowerShell 窗口；对于额外的 WSLC 会话，先清理其规则或终止已空闲的会话。然后双击安装目录内的 `Uninstall.cmd`，或执行：
 
 ```powershell
-.\Uninstall-WslcProxy.ps1
+& "$env:LOCALAPPDATA\wslc-local-proxy\Uninstall.cmd"
 ```
 
-卸载脚本清空本工具管理的默认会话镜像源、清理代理规则、移除两个用户 profile 中本项目的加载段，并停止本安装的辅助进程。包文件、保存配置、日志和 profile 备份保留，便于检查或重新安装。其他已打开窗口中的旧函数需要通过关闭窗口清除。
+卸载入口保留在安装目录内，删除下载的 ZIP 或解压目录后仍可使用；自定义安装目录可从该目录运行。卸载脚本清空本工具管理的默认会话镜像源、清理代理规则，仅移除指向本安装目录的加载段，并停止本安装的辅助进程。若 profile 已切换到其他安装目录，保留其加载段和会话设置。转发器按程序路径识别，损坏的 `relay.json` 不阻断清理。包文件、保存配置、日志和 profile 备份保留，便于检查或重新安装。其他已打开窗口中的旧函数需要通过关闭窗口清除。
 
 `-SkipSessionCleanup` 只用于已清理或终止相关会话的情况；否则会话可能仍保留指向已停止转发器的规则。
 
@@ -210,12 +216,14 @@ flowchart LR
 go test ./...
 go vet ./...
 .\Build.ps1
+.\Package.ps1 -Version 0.1.1
 .\tests\Test-Configuration.ps1
 .\tests\Test-ConfigurationConcurrency.ps1
 .\tests\Test-Wrapper.ps1
 .\tests\Test-RegistryMirrors.ps1
 .\tests\Test-RegistryMapping.ps1
 .\tests\Test-Installation.ps1
+.\tests\Test-InstallationSafety.ps1
 ```
 
 Go 测试覆盖代理地址解析、HTTP 原始字节保留、TLS 转发及证书校验。PowerShell 测试覆盖配置保留、镜像源校验、设置/查看/清空、引擎字段保留、会话恢复、并发编辑重试，以及仓库映射的命名空间、回退、拉取策略、digest、批量标签、容器参数、退出码和 PS5.1 错误输出兼容。安装测试覆盖升级、含空格路径、代理切换、profile 保留和卸载。测试使用模拟命令、临时安装目录和临时 profile，不修改真实用户配置或会话；需要本机存在 `wslc.exe`。
@@ -229,3 +237,5 @@ Go 测试覆盖代理地址解析、HTTP 原始字节保留、TLS 转发及证�
 2026-11-15 在源码和已安装版本上完成跨进程配置锁验证：6 个混合版本写进程与持续读进程通过 180 项检查，覆盖并发增删、字段保留及上述异常和恢复路径。PowerShell 5.1、7 的既有配置、映射、包装和安装回归测试通过，用户原有自动代理与镜像源配置保留。
 
 构建结果、运行日志、本机配置和状态文件均由 `.gitignore` 排除。
+
+安装安全测试额外覆盖依赖缺失、架构与校验失败、ANSI/UTF-16 profile、原始备份、重复安装、旧目录卸载、安装目录内的卸载入口、文件占用后的回滚、旧进程与监听端口保留、损坏状态重装修复与卸载清理，以及混合 PowerShell 5.1/7 的并发安装和卸载。`Package.ps1` 按固定文件列表生成 x64/ARM64 ZIP 和 SHA-256 清单，运行时无需 Go。
